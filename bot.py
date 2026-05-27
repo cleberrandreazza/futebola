@@ -3422,7 +3422,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!proximos [time]` `/proximos` — Próximos 5 jogos (todas as ligas)\n"
             "`!proximos [liga] [time]` — Próximos jogos em uma liga específica\n"
             "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
-            "`!historico [time]` `/historico` — Partidas encerradas (últimos 60 dias)"
+            "`!historico [time]` `/historico` — Partidas encerradas (últimos 90 dias)"
         ),
         inline=False,
     )
@@ -3745,8 +3745,8 @@ body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;mi
     return html
 
 
-def _buscar_partidas_passadas(nome_time: str, dias: int = 60) -> tuple[list[dict], str] | None:
-    """Retorna (events, display_name) das partidas encerradas de um time nos últimos N dias."""
+def _buscar_partidas_passadas(nome_time: str, dias: int = 90) -> tuple[list[dict], str] | None:
+    """Retorna (events, display_name) das últimas 10 partidas encerradas de um time."""
     team_map = _bz_build_team_map()
     busca    = nome_time.lower().strip()
     result   = team_map.get(busca)
@@ -3762,18 +3762,18 @@ def _buscar_partidas_passadas(nome_time: str, dias: int = 60) -> tuple[list[dict
         return None
     team_id, display_name = result
     hoje = datetime.now(tz=BRT).date()
-    data = _bzzoiro_get("events/", {
+    # Endpoint team-specific: cobre todas as competições (não só Brasileirao/Copa)
+    data = _bzzoiro_get(f"teams/{team_id}/fixtures/", {
         "date_from": str(hoje - timedelta(days=dias)),
         "date_to":   str(hoje),
-        "limit": 300,
+        "limit": 30,
     })
     events = [
         ev for ev in (data or {}).get("results", [])
-        if (ev.get("home_team_id") == team_id or ev.get("away_team_id") == team_id)
-        and ev.get("status") == "finished"
+        if ev.get("status") == "finished"
     ]
     events.sort(key=lambda e: e.get("event_date", ""), reverse=True)
-    return (events[:25], display_name) if events else None
+    return (events[:10], display_name) if events else None
 
 
 def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
@@ -3938,7 +3938,7 @@ async def cmd_historico(ctx, *, query: str = ""):
     loop = asyncio.get_event_loop()
     res  = await loop.run_in_executor(None, _buscar_partidas_passadas, query.strip())
     if not res:
-        await msg.edit(content=f"❌ Nenhuma partida encerrada encontrada para **{query}** nos últimos 60 dias.")
+        await msg.edit(content=f"❌ Nenhuma partida encerrada encontrada para **{query}** nos últimos 90 dias.")
         return
     events, nome_oficial = res
     opcoes = _build_historico_options(events)
@@ -3947,7 +3947,7 @@ async def cmd_historico(ctx, *, query: str = ""):
         return
     view = PartidaSelectView(opcoes)
     await msg.edit(
-        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 60 dias)\nSelecione uma partida para ver os detalhes:",
+        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 90 dias)\nSelecione uma partida para ver os detalhes:",
         view=view,
     )
 
@@ -4202,7 +4202,7 @@ async def slash_historico(interaction: discord.Interaction, time: str):
     loop = asyncio.get_event_loop()
     res  = await loop.run_in_executor(None, _buscar_partidas_passadas, time.strip())
     if not res:
-        await interaction.followup.send(f"❌ Nenhuma partida encerrada encontrada para **{time}** nos últimos 60 dias.")
+        await interaction.followup.send(f"❌ Nenhuma partida encerrada encontrada para **{time}** nos últimos 90 dias.")
         return
     events, nome_oficial = res
     opcoes = _build_historico_options(events)
@@ -4211,7 +4211,7 @@ async def slash_historico(interaction: discord.Interaction, time: str):
         return
     view = PartidaSelectView(opcoes)
     await interaction.followup.send(
-        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 60 dias)\nSelecione uma partida para ver os detalhes:",
+        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 90 dias)\nSelecione uma partida para ver os detalhes:",
         view=view,
     )
 
