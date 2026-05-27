@@ -2442,7 +2442,7 @@ function esc(s) {
 }
 function logo(url, sz) {
     sz = sz||42;
-    if (url) return '<img src="'+url+'" width="'+sz+'" height="'+sz+'" style="object-fit:contain" onerror="this.replaceWith(document.createElement(\'div\'))">';
+    if (url) return '<img src="'+url+'" width="'+sz+'" height="'+sz+'" style="object-fit:contain" onerror="this.remove()">';
     return '<div class="logo-ph" style="width:'+sz+'px;height:'+sz+'px"></div>';
 }
 function now() {
