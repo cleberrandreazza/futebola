@@ -52,12 +52,14 @@ LIGAS = {
     "seriea":        "ITA.1",
     "bundesliga":    "GER.1",
     "ligue1":        "FRA.1",
+    "amistosos":     "fifa.friendly",
+    "copamundo":     "fifa.world",
     # Copa do Brasil: roteado via API-Football, não ESPN
     "copadobrasil":  None,
 }
 
 # Ligas exibidas no !hoje e no resumo diário automático
-LIGAS_RESUMO = ["brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
+LIGAS_RESUMO = ["copamundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
 PASTA_LOGOS = "logos"
 os.makedirs(PASTA_LOGOS, exist_ok=True)
@@ -104,16 +106,18 @@ def _revogar_sessoes(event_id: str) -> int:
 
 # Metadados das ligas para exibição no resumo diário
 LIGAS_META = {
-    "brasileirao":   {"nome": "Brasileirão Série A", "emoji": "🇧🇷"},
-    "premierleague": {"nome": "Premier League",      "emoji": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
-    "champions":     {"nome": "Champions League",    "emoji": "⭐"},
-    "copadobrasil":  {"nome": "Copa do Brasil",      "emoji": "🏆"},
-    "sulamericana":  {"nome": "Sul-Americana",       "emoji": "🌎"},
-    "libertadores":  {"nome": "Libertadores",        "emoji": "🌎"},
-    "laliga":        {"nome": "La Liga",             "emoji": "🇪🇸"},
-    "seriea":        {"nome": "Serie A",             "emoji": "🇮🇹"},
-    "bundesliga":    {"nome": "Bundesliga",          "emoji": "🇩🇪"},
-    "ligue1":        {"nome": "Ligue 1",             "emoji": "🇫🇷"},
+    "brasileirao":   {"nome": "Brasileirão Série A",        "emoji": "🇧🇷"},
+    "premierleague": {"nome": "Premier League",             "emoji": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
+    "champions":     {"nome": "Champions League",           "emoji": "⭐"},
+    "copadobrasil":  {"nome": "Copa do Brasil",             "emoji": "🏆"},
+    "sulamericana":  {"nome": "Sul-Americana",              "emoji": "🌎"},
+    "libertadores":  {"nome": "Libertadores",               "emoji": "🌎"},
+    "laliga":        {"nome": "La Liga",                    "emoji": "🇪🇸"},
+    "seriea":        {"nome": "Serie A",                    "emoji": "🇮🇹"},
+    "bundesliga":    {"nome": "Bundesliga",                 "emoji": "🇩🇪"},
+    "ligue1":        {"nome": "Ligue 1",                    "emoji": "🇫🇷"},
+    "amistosos":     {"nome": "Amistosos Internacionais",   "emoji": "🌍"},
+    "copamundo":     {"nome": "Copa do Mundo FIFA",         "emoji": "🏆"},
 }
 
 
@@ -506,6 +510,8 @@ _TV_POR_LIGA: dict[str, list[str]] = {
     "ITA.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+"],
     "GER.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+", "RedeTV"],
     "FRA.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+"],
+    "fifa.friendly":            ["SporTV", "SporTV 2", "SporTV 3", "Globo", "Band"],
+    "fifa.world":               ["Globo", "SporTV", "SporTV 2", "SporTV 3", "Band"],
 }
 
 
@@ -889,6 +895,10 @@ _ZONAS_LIGA: dict[str, list] = {
         (2,    "za", "#3b82f6", "16 avos de Final"),
         (3,    "zb", "#f59e0b", "Próxima fase"),
         ("b1", "zc", "#ef4444", "Eliminado"),
+    ],
+    "fifa.world": [
+        (2,    "za", "#3b82f6", "Oitavas de Final"),
+        ("b2", "zc", "#ef4444", "Eliminado"),
     ],
 }
 
