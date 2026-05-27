@@ -2144,4 +2144,12 @@ async def cmd_ajuda(ctx):
     await ctx.send(embed=embed)
 
 
+if not TOKEN_DO_DISCORD:
+    print("=== ERRO: TOKEN_DISCORD não encontrado ===")
+    print("Variáveis de ambiente disponíveis:")
+    for k, v in os.environ.items():
+        if any(x in k.upper() for x in ("TOKEN", "DISCORD", "BOT")):
+            print(f"  {k}={'***' if v else '(vazio)'}")
+    raise SystemExit("Defina TOKEN_DISCORD no Railway (ou no .env local).")
+
 bot.run(TOKEN_DO_DISCORD)
