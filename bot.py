@@ -101,16 +101,34 @@ _player_sessions: dict[str, dict] = {}
 _partida_pages: dict[str, str] = {}
 
 
-def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str) -> str:
+def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
+                   bz_event_id: int | None = None) -> str:
     token = secrets.token_urlsafe(24)
     _player_sessions[token] = {
-        "stream_url": stream_url,
-        "title":      title,
-        "event_id":   event_id,
-        "slug":       slug,
+        "stream_url":  stream_url,
+        "title":       title,
+        "event_id":    event_id,
+        "slug":        slug,
+        "bz_event_id": bz_event_id,
     }
-    print(f"[Session] criada token={token[:8]}… event={event_id}")
+    print(f"[Session] criada token={token[:8]}… event={event_id} bz={bz_event_id}")
     return token
+
+
+def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
+    """Busca o event_id Bzzoiro para um jogo de hoje pelos nomes dos times."""
+    hoje = datetime.now(tz=BRT).date()
+    for league_id, extra in [(_BZ_BRASILEIRAO_LEAGUE, {}), (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON})]:
+        params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
+        params.update(extra)
+        data = _bzzoiro_get("events/", params)
+        for ev in (data or {}).get("results", []):
+            bh = (ev.get("home_team") or "").lower()
+            ba = (ev.get("away_team") or "").lower()
+            qh = nome_casa.lower(); qa = nome_fora.lower()
+            if (qh in bh or bh in qh) and (qa in ba or ba in qa):
+                return ev.get("id")
+    return None
 
 
 def _revogar_sessoes(event_id: str) -> int:
@@ -2282,51 +2300,290 @@ _PLAYER_HTML = """\
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.js"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;
-      min-height:100vh;display:flex;flex-direction:column;align-items:center;
-      justify-content:center;gap:14px;padding:16px}}
-h2{{font-size:18px;color:#93c5fd;text-align:center;max-width:800px}}
-video{{width:100%;max-width:1280px;background:#000;border-radius:10px;outline:none}}
-#status{{font-size:13px;color:#8892a4;text-align:center}}
+html,body{{height:100%;background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif}}
+.layout{{display:flex;height:100vh;max-width:1700px;margin:0 auto}}
+.vcol{{flex:1;min-width:0;display:flex;flex-direction:column;padding:14px;gap:10px;overflow:hidden}}
+.vtitle{{font-size:15px;font-weight:700;color:#93c5fd;text-align:center;flex-shrink:0}}
+video{{width:100%;flex:1;min-height:0;background:#000;border-radius:10px;outline:none;display:block}}
+.vstatus{{font-size:12px;color:#8892a4;text-align:center;flex-shrink:0}}
+.dcol{{width:390px;flex-shrink:0;background:#161b22;border-left:1px solid #21262d;display:flex;flex-direction:column;height:100vh;overflow:hidden}}
+/* header */
+.dheader{{padding:14px 14px 10px;background:#16213e;border-bottom:1px solid #21262d;flex-shrink:0}}
+.comp{{font-size:10px;color:#8892a4;text-align:center;margin-bottom:8px}}
+.score-row{{display:flex;align-items:center;justify-content:space-between;gap:6px}}
+.team{{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;min-width:0}}
+.team img{{width:42px;height:42px;object-fit:contain}}
+.logo-ph{{width:42px;height:42px;background:#0f3460;border-radius:8px;flex-shrink:0}}
+.tname{{font-size:12px;font-weight:700;text-align:center;word-break:break-word}}
+.smid{{text-align:center;flex-shrink:0;min-width:84px}}
+.score{{font-size:42px;font-weight:800;color:#fff;letter-spacing:3px}}
+.ht{{font-size:10px;color:#8892a4;margin-top:2px}}
+.badge{{display:inline-block;padding:3px 10px;border-radius:10px;font-size:10px;font-weight:700;color:#fff;margin-top:6px}}
+.venue{{font-size:10px;color:#8892a4;margin-top:8px;text-align:center}}
+/* tabs */
+.tabs{{display:flex;flex-shrink:0;border-bottom:1px solid #21262d;background:#0d1117}}
+.tab{{flex:1;padding:9px 2px;text-align:center;font-size:10px;font-weight:700;color:#8892a4;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}}
+.tab.active{{color:#93c5fd;border-bottom-color:#3b82f6;background:#161b22}}
+.tab:hover:not(.active){{color:#cbd5e1}}
+.dcontent{{flex:1;overflow-y:auto}}
+/* incidents */
+.sec-hdr{{background:#1a2a5e;color:#93c5fd;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0}}
+.updated{{font-size:9px;color:#4b5563;font-weight:400}}
+.inc-hdr,.inc-row{{display:flex;align-items:center;padding:0 10px}}
+.inc-h{{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:4px;text-align:right;padding:6px 5px;font-size:12px}}
+.inc-a{{flex:1;display:flex;align-items:center;gap:4px;text-align:left;padding:6px 5px;font-size:12px}}
+.inc-m{{width:50px;text-align:center;color:#93c5fd;font-size:11px;font-weight:700;flex-shrink:0}}
+.inc-row{{border-bottom:1px solid #0d1117}}
+.inc-sub .inc-h,.inc-sub .inc-a{{font-size:10px;color:#8892a4}}
+.ic{{font-size:14px;flex-shrink:0}}
+.assist{{color:#8892a4;font-size:10px}}
+.sub-in{{color:#10b981}}.sub-out{{color:#ef4444}}
+.psep{{background:#0f1c33;color:#6b7a99;text-align:center;font-size:10px;padding:5px;letter-spacing:1px}}
+/* stats */
+.stats-body{{padding:6px 14px 12px}}
+.stat-row{{display:flex;align-items:center;gap:6px;padding:7px 0;border-bottom:1px solid #0f1c33}}
+.sv{{width:40px;font-size:12px;font-weight:700;flex-shrink:0}}
+.sh{{text-align:right;color:#60a5fa}}.sa{{text-align:left;color:#fbbf24}}
+.sbar{{flex:1;height:5px;background:#0f3460;border-radius:3px;overflow:hidden}}
+.sb-h{{background:#3b82f6;height:100%;float:right}}.sb-a{{background:#f59e0b;height:100%;float:left}}
+.slabel{{width:96px;text-align:center;font-size:10px;color:#8892a4;flex-shrink:0}}
+/* lineups */
+.lu-wrap{{display:flex}}
+.lu-col{{flex:1;padding:8px 10px;min-width:0}}
+.lu-col-r{{text-align:right}}
+.lu-div{{width:1px;background:#21262d;flex-shrink:0}}
+.lu-head{{font-size:11px;color:#93c5fd;font-weight:700;margin-bottom:7px;padding-bottom:5px;border-bottom:1px solid #21262d}}
+.pl{{display:flex;align-items:center;gap:4px;padding:4px 0;border-bottom:1px solid #0d1117;font-size:11px}}
+.pl-r{{justify-content:flex-end}}
+.pj{{width:20px;height:20px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:#93c5fd;flex-shrink:0;text-align:center}}
+.pp{{font-size:8px;color:#8892a4;width:12px;flex-shrink:0;text-align:center}}
+.pn{{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.no-data{{padding:20px;text-align:center;color:#4b5563;font-size:12px}}
+@media(max-width:960px){{
+  .layout{{flex-direction:column;height:auto}}
+  .vcol{{padding:10px;overflow:visible}}
+  video{{max-height:56vw;flex:none}}
+  .dcol{{width:100%;height:auto;border-left:none;border-top:1px solid #21262d}}
+}}
 </style>
 </head>
 <body>
-<h2>⚽ {title}</h2>
-<video id="v" controls autoplay playsinline></video>
-<div id="status">Conectando...</div>
+<div class="layout">
+  <div class="vcol">
+    <div class="vtitle">⚽ {title}</div>
+    <video id="v" controls autoplay playsinline></video>
+    <div class="vstatus" id="vstatus">Conectando...</div>
+  </div>
+  <div class="dcol">
+    <div class="dheader" id="dheader"><div class="no-data">Carregando dados da partida...</div></div>
+    <div class="tabs" id="tabs" style="display:none">
+      <div class="tab active" data-tab="inc" onclick="showTab('inc')">⏱ Lance a Lance</div>
+      <div class="tab" data-tab="stats" onclick="showTab('stats')">📊 Stats</div>
+      <div class="tab" data-tab="lu" onclick="showTab('lu')">👥 Escalações</div>
+    </div>
+    <div class="dcontent">
+      <div id="tab-inc"></div>
+      <div id="tab-stats" style="display:none"></div>
+      <div id="tab-lu"    style="display:none"></div>
+    </div>
+  </div>
+</div>
 <script>
 const TOKEN    = location.pathname.split("/").pop();
-const proxyUrl = "{server_url}/proxy/" + TOKEN;
+const PROXY    = "{server_url}/proxy/" + TOKEN;
+const API      = "{server_url}/api/live/" + TOKEN;
 const isHLS    = "{stream_url}".includes(".m3u8");
 const v        = document.getElementById("v");
-const st       = document.getElementById("status");
+const vstatus  = document.getElementById("vstatus");
+let   curTab   = "inc";
 
-function setStatus(msg) {{ st.textContent = msg; }}
-
+// ── Video ──────────────────────────────────────────────────────────────────
+function setVStatus(m) {{ vstatus.textContent = m; }}
 if (isHLS && Hls.isSupported()) {{
-    const hls = new Hls({{ enableWorker: true, lowLatencyMode: true }});
-    hls.loadSource(proxyUrl);
-    hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {{ v.play(); setStatus("🔴 Ao vivo"); }});
-    hls.on(Hls.Events.ERROR, (_, d) => {{
-        if (d.fatal) setStatus("❌ " + d.details);
-        console.error("[HLS]", d);
-    }});
+    const hls = new Hls({{enableWorker:true,lowLatencyMode:true}});
+    hls.loadSource(PROXY); hls.attachMedia(v);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {{ v.play(); setVStatus("🔴 Ao vivo"); }});
+    hls.on(Hls.Events.ERROR, (_,d) => {{ if(d.fatal) setVStatus("❌ "+d.details); }});
 }} else if (mpegts.isSupported()) {{
-    const player = mpegts.createPlayer({{
-        type: "mpegts", isLive: true, url: proxyUrl,
-    }}, {{ enableWorker: true, lazyLoadMaxDuration: 180, seekType: "range" }});
-    player.attachMediaElement(v);
-    player.load();
-    player.play();
-    player.on(mpegts.Events.MEDIA_INFO,  ()     => setStatus("🔴 Ao vivo"));
-    player.on(mpegts.Events.ERROR,       (t, d) => {{
-        setStatus("❌ " + t + ": " + JSON.stringify(d));
-        console.error("[MPEGTS]", t, d);
-    }});
+    const p = mpegts.createPlayer({{type:"mpegts",isLive:true,url:PROXY}},
+        {{enableWorker:true,lazyLoadMaxDuration:180,seekType:"range"}});
+    p.attachMediaElement(v); p.load(); p.play();
+    p.on(mpegts.Events.MEDIA_INFO, () => setVStatus("🔴 Ao vivo"));
+    p.on(mpegts.Events.ERROR, (t) => setVStatus("❌ "+t));
 }} else {{
-    setStatus("❌ Navegador sem suporte a streams. Use Chrome.");
+    setVStatus("❌ Navegador sem suporte. Use Chrome.");
 }}
+
+// ── Tabs ────────────────────────────────────────────────────────────────────
+function showTab(id) {{
+    curTab = id;
+    ["inc","stats","lu"].forEach(t => {{
+        document.getElementById("tab-"+t).style.display = (t===id ? "" : "none");
+    }});
+    document.querySelectorAll(".tab").forEach(el => {{
+        el.classList.toggle("active", el.dataset.tab === id);
+    }});
+}}
+
+// ── Utils ───────────────────────────────────────────────────────────────────
+function esc(s) {{
+    return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}}
+function logo(url, sz) {{
+    sz = sz||42;
+    if (url) return '<img src="'+url+'" width="'+sz+'" height="'+sz+'" style="object-fit:contain" onerror="this.replaceWith(document.createElement(\'div\'))">';
+    return '<div class="logo-ph" style="width:'+sz+'px;height:'+sz+'px"></div>';
+}}
+function now() {{
+    return new Date().toLocaleTimeString("pt-BR",{{hour:"2-digit",minute:"2-digit"}});
+}}
+function sv(side, keys) {{
+    for (var i=0;i<keys.length;i++) {{
+        var v = (side||{{}})[keys[i]];
+        if (typeof v==="object"&&v!==null) v=v.actual??v.value??v.pct??0;
+        if (v!==null&&v!==undefined) {{ var n=parseFloat(v); if(!isNaN(n)) return n; }}
+    }}
+    return 0;
+}}
+
+// ── Header ──────────────────────────────────────────────────────────────────
+function renderHeader(ev, venue, logos) {{
+    if (!ev) return;
+    var st=ev.status||"", mn=ev.current_minute;
+    var bText="A INICIAR", bColor="#8892a4";
+    if (st==="finished") {{ bText=(ev.period||"FT").toUpperCase(); bColor="#10b981"; }}
+    else if (st!=="notstarted") {{ bText=mn?mn+"'":"AO VIVO"; bColor="#ef4444"; }}
+    var hasScore=st!=="notstarted";
+    var scoreStr=hasScore?(ev.home_score??"-")+" · "+(ev.away_score??"-"):"vs";
+    var htHtml=(hasScore&&ev.home_score_ht!=null)
+        ? '<div class="ht">Intervalo '+ev.home_score_ht+"-"+ev.away_score_ht+"</div>" : "";
+    var lg=logos||{{}};
+    document.getElementById("dheader").innerHTML =
+        '<div class="comp">'+esc(ev.competition_name||"")+'</div>'+
+        '<div class="score-row">'+
+          '<div class="team">'+logo(lg[ev.home_team||""])+'<div class="tname">'+esc(ev.home_team||"?")+'</div></div>'+
+          '<div class="smid">'+
+            '<div class="score">'+scoreStr+'</div>'+htHtml+
+            '<span class="badge" style="background:'+bColor+'">'+bText+'</span>'+
+          '</div>'+
+          '<div class="team">'+logo(lg[ev.away_team||""])+'<div class="tname">'+esc(ev.away_team||"?")+'</div></div>'+
+        '</div>'+
+        (venue&&venue.name?'<div class="venue">📍 '+esc(venue.name)+(venue.city?" "+esc(venue.city):"")+'</div>':"");
+    document.getElementById("tabs").style.display="";
+}}
+
+// ── Incidents ───────────────────────────────────────────────────────────────
+function renderIncidents(incs, ev) {{
+    var hName=esc(ev&&ev.home_team||"Casa"), aName=esc(ev&&ev.away_team||"Fora");
+    if (!incs||!incs.length) {{
+        document.getElementById("tab-inc").innerHTML='<div class="no-data">Sem incidentes registrados.</div>';
+        return;
+    }}
+    var sorted=incs.slice().sort(function(a,b){{return (a.minute||0)-(b.minute||0)||(a.added_time||0)-(b.added_time||0);}});
+    var rows='<div class="inc-hdr"><div class="inc-h" style="font-size:10px;color:#8892a4">'+hName+'</div><div class="inc-m"></div><div class="inc-a" style="font-size:10px;color:#8892a4">'+aName+'</div></div>';
+    function minStr(i) {{ return i.added_time?i.minute+"+"+i.added_time+"'":i.minute+"'"; }}
+    for (var i=0;i<sorted.length;i++) {{
+        var inc=sorted[i], t=inc.type||"", mn=minStr(inc), home=inc.is_home!==false;
+        if (t==="period") {{
+            if (/(HT|HALF)/i.test(inc.text||""))
+                rows+='<div class="psep">── INTERVALO '+(inc.home_score||"")+"-"+(inc.away_score||"")+" ──</div>";
+            continue;
+        }}
+        if (t==="injuryTime") {{
+            rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">+'+(inc.length||"?")+"'</div>"+'<div class="inc-a" style="font-size:9px;color:#6b7a99">acréscimos</div></div>';
+            continue;
+        }}
+        if (t==="goal") {{
+            var own=inc.goal_type==="own";
+            var txt='<b>'+esc(inc.player||"")+'</b>'+(inc.assist?' <span class="assist">('+esc(inc.assist)+')</span>':"")+(own?' <span style="color:#ef4444;font-size:9px">CG</span>':"");
+            if (home) rows+='<div class="inc-row"><div class="inc-h"><span class="ic">⚽</span>'+txt+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
+            else      rows+='<div class="inc-row"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+txt+'<span class="ic">⚽</span></div></div>';
+        }} else if (t==="card") {{
+            var icon=inc.card_type==="yellow"?"🟡":"🟥";
+            if (home) rows+='<div class="inc-row inc-sub"><div class="inc-h"><span class="ic">'+icon+'</span>'+esc(inc.player||"")+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
+            else      rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+esc(inc.player||"")+'<span class="ic">'+icon+'</span></div></div>';
+        }} else if (t==="substitution") {{
+            var stxt='<span class="sub-in">↑ '+esc(inc.player_in||"")+'</span> <span class="sub-out">↓ '+esc(inc.player_out||"")+'</span>';
+            if (home) rows+='<div class="inc-row inc-sub"><div class="inc-h">'+stxt+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
+            else      rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+stxt+'</div></div>';
+        }}
+    }}
+    document.getElementById("tab-inc").innerHTML=
+        '<div class="sec-hdr">Lance a Lance<span class="updated">att. '+now()+'</span></div>'+rows;
+}}
+
+// ── Stats ───────────────────────────────────────────────────────────────────
+function statRow(label, hv, av, pct, dec) {{
+    var total=hv+av;
+    var hBar=pct?Math.round(hv):(total>0?Math.round(hv/total*100):50);
+    var aBar=100-hBar;
+    function fmt(n) {{ return dec?n.toFixed(dec):Math.round(n); }}
+    var suf=pct?"%":"";
+    return '<div class="stat-row">'+
+        '<div class="sv sh">'+fmt(hv)+suf+'</div>'+
+        '<div class="sbar"><div class="sb-h" style="width:'+hBar+'%"></div></div>'+
+        '<div class="slabel">'+label+'</div>'+
+        '<div class="sbar"><div class="sb-a" style="width:'+aBar+'%"></div></div>'+
+        '<div class="sv sa">'+fmt(av)+suf+'</div>'+
+    '</div>';
+}}
+function renderStats(stats) {{
+    var sh=stats.home||{{}}, sa=stats.away||{{}};
+    if (!Object.keys(sh).length&&!Object.keys(sa).length) {{
+        document.getElementById("tab-stats").innerHTML='<div class="no-data">Estatísticas não disponíveis.</div>';
+        return;
+    }}
+    var rows="";
+    rows+=statRow("Posse",          sv(sh,["ball_possession"]),              sv(sa,["ball_possession"]),              true,  0);
+    rows+=statRow("xG",             sv(sh,["xg","expected_goals"]),          sv(sa,["xg","expected_goals"]),          false, 2);
+    rows+=statRow("Finalizações",   sv(sh,["total_shots"]),                  sv(sa,["total_shots"]),                  false, 0);
+    rows+=statRow("No Alvo",        sv(sh,["shots_on_target"]),              sv(sa,["shots_on_target"]),              false, 0);
+    rows+=statRow("Dentro da Área", sv(sh,["shots_inside_box"]),             sv(sa,["shots_inside_box"]),             false, 0);
+    rows+=statRow("Prec. Passe",    sv(sh,["pass_accuracy_pct"]),            sv(sa,["pass_accuracy_pct"]),            true,  0);
+    rows+=statRow("Escanteios",     sv(sh,["corner_kicks"]),                 sv(sa,["corner_kicks"]),                 false, 0);
+    rows+=statRow("Faltas",         sv(sh,["fouls"]),                        sv(sa,["fouls"]),                        false, 0);
+    rows+=statRow("Cart. Amarelo",  sv(sh,["yellow_cards"]),                 sv(sa,["yellow_cards"]),                 false, 0);
+    rows+=statRow("Defesas",        sv(sh,["goalkeeper_saves","total_saves"]),sv(sa,["goalkeeper_saves","total_saves"]),false, 0);
+    document.getElementById("tab-stats").innerHTML=
+        '<div class="sec-hdr">Estatísticas<span class="updated">att. '+now()+'</span></div>'+
+        '<div class="stats-body">'+rows+'</div>';
+}}
+
+// ── Lineups ──────────────────────────────────────────────────────────────────
+function renderLineups(lineups, ev) {{
+    var lh=lineups.home||{{}}, la=lineups.away||{{}};
+    var hxi=lh.players||[], axi=la.players||[];
+    if (!hxi.length&&!axi.length) {{
+        document.getElementById("tab-lu").innerHTML='<div class="no-data">Escalação não disponível.</div>';
+        return;
+    }}
+    var hHead=esc((ev&&ev.home_team)||"Casa")+(lh.formation?" ("+lh.formation+")":"");
+    var aHead=esc((ev&&ev.away_team)||"Fora")+(la.formation?" ("+la.formation+")":"");
+    function plH(p) {{ return '<div class="pl"><div class="pj">'+esc(p.jersey_number||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pn">'+esc(p.name||"")+'</div></div>'; }}
+    function plA(p) {{ return '<div class="pl pl-r"><div class="pn">'+esc(p.name||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pj">'+esc(p.jersey_number||"")+'</div></div>'; }}
+    document.getElementById("tab-lu").innerHTML=
+        '<div class="sec-hdr">Escalações</div>'+
+        '<div class="lu-wrap">'+
+          '<div class="lu-col"><div class="lu-head">'+hHead+'</div>'+hxi.map(plH).join("")+'</div>'+
+          '<div class="lu-div"></div>'+
+          '<div class="lu-col lu-col-r"><div class="lu-head">'+aHead+'</div>'+axi.map(plA).join("")+'</div>'+
+        '</div>';
+}}
+
+// ── Fetch & refresh ──────────────────────────────────────────────────────────
+async function fetchLive() {{
+    try {{
+        var r = await fetch(API+"?t="+Date.now());
+        if (!r.ok) return;
+        var d = await r.json();
+        renderHeader(d.evento, d.venue, d.logos);
+        renderIncidents((d.incidents||{{}}).incidents||[], d.evento);
+        renderStats((d.stats||{{}}).stats||{{}});
+        renderLineups((d.lineups||{{}}).lineups||{{}}, d.evento);
+    }} catch(e) {{ console.error("[Live]", e); }}
+}}
+fetchLive();
+setInterval(fetchLive, 30000);
 </script>
 </body>
 </html>"""
@@ -2364,6 +2621,27 @@ async def _web_partida_html_handler(request: aiohttp_web.Request) -> aiohttp_web
             content_type="text/html", status=404,
         )
     return aiohttp_web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def _web_live_api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    token  = request.match_info.get("token", "")
+    sessao = _player_sessions.get(token)
+    if not sessao:
+        return aiohttp_web.json_response({"error": "sessão não encontrada"}, status=404, headers=_CORS_HEADERS)
+    bz_id = sessao.get("bz_event_id")
+    if not bz_id:
+        return aiohttp_web.json_response({"error": "sem dados Bzzoiro"}, status=404, headers=_CORS_HEADERS)
+    loop  = asyncio.get_event_loop()
+    dados = await loop.run_in_executor(None, buscar_detalhes_partida, bz_id)
+    if not dados:
+        return aiohttp_web.json_response({"error": "dados indisponíveis"}, status=503, headers=_CORS_HEADERS)
+    logo_map = _buscar_logos_brasileiros()
+    ev = dados.get("evento") or {}
+    dados["logos"] = {
+        ev.get("home_team", ""): logo_map.get(ev.get("home_team", ""), ""),
+        ev.get("away_team", ""): logo_map.get(ev.get("away_team", ""), ""),
+    }
+    return aiohttp_web.json_response(dados, headers=_CORS_HEADERS)
 
 
 def _publicar_partida_web(html: str) -> str:
@@ -2438,8 +2716,9 @@ async def _proxy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
 
 async def _iniciar_servidor_web():
     app = aiohttp_web.Application()
-    app.router.add_get("/player/{token}",  _web_player_handler)
+    app.router.add_get("/player/{token}",   _web_player_handler)
     app.router.add_get("/partida/{token}", _web_partida_html_handler)
+    app.router.add_get("/api/live/{token}", _web_live_api_handler)
     app.router.add_get("/proxy/{token}",   _proxy_handler)
     app.router.add_get("/proxy",           _proxy_handler)   # segmentos reescritos do M3U8
     app.router.add_options("/proxy/{token}", lambda r: aiohttp_web.Response(headers=_CORS_HEADERS))
@@ -2799,8 +3078,10 @@ class _BotaoCanal(discord.ui.Button):
         self.nome_fora = nome_fora
 
     async def callback(self, interaction: discord.Interaction):
-        title      = f"{self.nome_casa} × {self.nome_fora}"
-        token      = _criar_sessao(self.canal["url"], title, self.event_id, self.slug)
+        title    = f"{self.nome_casa} × {self.nome_fora}"
+        loop     = asyncio.get_event_loop()
+        bz_eid   = await loop.run_in_executor(None, _find_bz_event_id, self.nome_casa, self.nome_fora)
+        token    = _criar_sessao(self.canal["url"], title, self.event_id, self.slug, bz_eid)
         player_url = f"{SERVER_URL}/player/{token}"
         for item in self.view.children:
             item.disabled = True
@@ -2894,7 +3175,8 @@ class TransmitirButton(discord.ui.Button):
             if canal_iptv:
                 stream_url = canal_iptv["url"]
                 title      = f"{nome_casa} × {nome_fora}"
-                token      = _criar_sessao(stream_url, title, self.event_id, slug)
+                bz_eid     = await loop.run_in_executor(None, _find_bz_event_id, nome_casa, nome_fora)
+                token      = _criar_sessao(stream_url, title, self.event_id, slug, bz_eid)
                 player_url = f"{SERVER_URL}/player/{token}"
                 self.label = f"📺 {canal_iptv['name'][:20]}"
                 await interaction.message.edit(view=self.view)
