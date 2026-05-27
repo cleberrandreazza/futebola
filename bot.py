@@ -67,13 +67,13 @@ LIGAS = {
     "bundesliga":    "GER.1",
     "ligue1":        "FRA.1",
     "amistosos":     "fifa.friendly",
-    "copamundo":     "fifa.world",
+    "copadomundo":     "fifa.world",
     # Copa do Brasil: roteado via API-Football, não ESPN
     "copadobrasil":  None,
 }
 
 # Ligas exibidas no !hoje e no resumo diário automático
-LIGAS_RESUMO = ["copamundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
+LIGAS_RESUMO = ["copadomundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
 PASTA_LOGOS = "logos"
 os.makedirs(PASTA_LOGOS, exist_ok=True)
@@ -152,7 +152,7 @@ LIGAS_META = {
     "bundesliga":    {"nome": "Bundesliga",                 "emoji": "🇩🇪"},
     "ligue1":        {"nome": "Ligue 1",                    "emoji": "🇫🇷"},
     "amistosos":     {"nome": "Amistosos Internacionais",   "emoji": "🌍"},
-    "copamundo":     {"nome": "Copa do Mundo FIFA",         "emoji": "🏆"},
+    "copadomundo":     {"nome": "Copa do Mundo FIFA",         "emoji": "🏆"},
 }
 
 
