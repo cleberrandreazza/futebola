@@ -3039,10 +3039,20 @@ async def cmd_hoje(ctx):
         return
 
     total = sum(len(v) for v in jogos_por_liga.values())
-    img = await gerar_resumo_diario_png(jogos_por_liga)
+    img   = await gerar_resumo_diario_png(jogos_por_liga)
+
+    # Select Menu: partidas com detalhes via Bzzoiro
+    bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
+    view      = None
+    if bz_events:
+        opcoes = _build_partida_options(bz_events)
+        if opcoes:
+            view = PartidaSelectView(opcoes)
+
     await ctx.send(
         content=f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas",
         file=discord.File(img),
+        view=view,
     )
 
 
@@ -3665,16 +3675,120 @@ body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
     return await _html_para_png(html, "partida_temp.png", width=680)
 
 
+def buscar_eventos_hoje_bzzoiro() -> list[dict]:
+    """Retorna todos os eventos Bzzoiro de hoje (Brasileirão + Copa do Brasil)."""
+    hoje   = datetime.now(tz=BRT).date()
+    events: list[dict] = []
+    for league_id, extra in [(_BZ_BRASILEIRAO_LEAGUE, {}), (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON})]:
+        params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
+        params.update(extra)
+        data = _bzzoiro_get("events/", params)
+        events.extend((data or {}).get("results", []))
+    return events
+
+
+def _buscar_event_id_por_time(nome_time: str) -> int | None:
+    """Retorna o event_id Bzzoiro mais recente (hoje ou últimos 14 dias) para um time."""
+    team_map = _bz_build_team_map()
+    busca    = nome_time.lower().strip()
+    result   = team_map.get(busca)
+    if not result:
+        best, best_score = None, 0
+        for norm, val in team_map.items():
+            if busca in norm or norm in busca:
+                score = len(set(busca) & set(norm))
+                if score > best_score:
+                    best_score, best = score, val
+        result = best
+    if not result:
+        return None
+    team_id, _ = result
+    hoje = datetime.now(tz=BRT).date()
+
+    # Hoje primeiro
+    data = _bzzoiro_get("events/", {"date_from": str(hoje), "date_to": str(hoje), "limit": 100})
+    for ev in (data or {}).get("results", []):
+        if ev.get("home_team_id") == team_id or ev.get("away_team_id") == team_id:
+            return ev["id"]
+
+    # Últimos 14 dias
+    data = _bzzoiro_get("events/", {
+        "date_from": str(hoje - timedelta(days=14)),
+        "date_to":   str(hoje - timedelta(days=1)),
+        "limit": 300,
+    })
+    matches = [ev for ev in (data or {}).get("results", [])
+               if ev.get("home_team_id") == team_id or ev.get("away_team_id") == team_id]
+    if matches:
+        matches.sort(key=lambda e: e.get("event_date", ""), reverse=True)
+        return matches[0]["id"]
+    return None
+
+
+def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
+    """Constrói opções do Select Menu a partir de eventos Bzzoiro."""
+    opts: list[discord.SelectOption] = []
+    seen: set[int] = set()
+    _emoji = {9: "🇧🇷", 35: "🏆"}
+    for ev in events:
+        eid = ev.get("id")
+        if not eid or eid in seen:
+            continue
+        seen.add(eid)
+        home   = ev.get("home_team", "?")
+        away   = ev.get("away_team", "?")
+        emoji  = _emoji.get(ev.get("league_id", 0), "⚽")
+        status = ev.get("status", "notstarted")
+        try:
+            dt  = datetime.fromisoformat(ev.get("event_date","").replace("Z","+00:00")).astimezone(BRT)
+            tme = dt.strftime("%H:%M")
+        except Exception:
+            tme = ""
+        label = f"{emoji} {home} × {away}"[:95] + (f" · {tme}" if tme and tme != "00:00" else "")
+        desc  = "🔴 Ao Vivo" if status not in ("notstarted","finished") else ("✅ Encerrado" if status == "finished" else f"🕐 {tme}")
+        opts.append(discord.SelectOption(label=label[:100], value=str(eid), description=desc))
+    return opts[:25]
+
+
+class PartidaSelectView(discord.ui.View):
+    def __init__(self, opcoes: list[discord.SelectOption]):
+        super().__init__(timeout=300)
+        sel = discord.ui.Select(
+            placeholder="🔍 Ver detalhes de uma partida...",
+            options=opcoes,
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        eid   = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        loop  = asyncio.get_event_loop()
+        dados = await loop.run_in_executor(None, buscar_detalhes_partida, eid)
+        if not dados:
+            await interaction.followup.send("❌ Detalhes não disponíveis.", ephemeral=True)
+            return
+        try:
+            cam = await gerar_partida_png(dados)
+            await interaction.followup.send(file=discord.File(cam))
+        except Exception as e:
+            await interaction.followup.send(f"Erro: {e}", ephemeral=True)
+
+
 @bot.command(name="partida")
-async def cmd_partida(ctx, event_id: str = ""):
-    if not event_id or not event_id.isdigit():
-        await ctx.send("Uso: `!partida [event_id]`\nEx: `!partida 7151`\nO ID da partida pode ser encontrado em https://sports.bzzoiro.com/matches/{id}/")
+async def cmd_partida(ctx, *, query: str = ""):
+    if not query:
+        await ctx.send("Uso: `!partida [time]`\nEx: `!partida Flamengo`")
         return
-    msg  = await ctx.send(f"🔍 Buscando detalhes da partida **{event_id}**...")
+    msg  = await ctx.send(f"🔍 Buscando partida de **{query}**...")
     loop = asyncio.get_event_loop()
-    dados = await loop.run_in_executor(None, buscar_detalhes_partida, int(event_id))
+    event_id = await loop.run_in_executor(None, _buscar_event_id_por_time, query.strip())
+    if not event_id:
+        await msg.edit(content=f"❌ Nenhuma partida encontrada para **{query}** nos últimos 14 dias.")
+        return
+    dados = await loop.run_in_executor(None, buscar_detalhes_partida, event_id)
     if not dados:
-        await msg.edit(content=f"❌ Partida `{event_id}` não encontrada.")
+        await msg.edit(content="❌ Detalhes não disponíveis para esta partida.")
         return
     try:
         caminho = await gerar_partida_png(dados)
@@ -3897,23 +4011,25 @@ async def slash_proximos(interaction: discord.Interaction, time: str, liga: str 
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
-@bot.tree.command(name="partida", description="Detalhes completos de uma partida (Bzzoiro ID)")
-@discord.app_commands.describe(event_id="ID da partida no Bzzoiro (ex: 7151)")
-async def slash_partida(interaction: discord.Interaction, event_id: str):
-    if not event_id.isdigit():
-        await interaction.response.send_message("Informe um ID numérico. Ex: `7151`", ephemeral=True)
-        return
+@bot.tree.command(name="partida", description="Detalhes da partida mais recente de um time")
+@discord.app_commands.describe(time="Nome do time (ex: Flamengo)")
+@discord.app_commands.autocomplete(time=_time_autocomplete)
+async def slash_partida(interaction: discord.Interaction, time: str):
     await interaction.response.defer()
-    loop  = asyncio.get_event_loop()
-    dados = await loop.run_in_executor(None, buscar_detalhes_partida, int(event_id))
+    loop     = asyncio.get_event_loop()
+    event_id = await loop.run_in_executor(None, _buscar_event_id_por_time, time.strip())
+    if not event_id:
+        await interaction.followup.send(f"❌ Nenhuma partida encontrada para **{time}** nos últimos 14 dias.")
+        return
+    dados = await loop.run_in_executor(None, buscar_detalhes_partida, event_id)
     if not dados:
-        await interaction.followup.send(f"❌ Partida `{event_id}` não encontrada.")
+        await interaction.followup.send("❌ Detalhes não disponíveis.")
         return
     try:
-        caminho = await gerar_partida_png(dados)
-        await interaction.followup.send(file=discord.File(caminho))
+        cam = await gerar_partida_png(dados)
+        await interaction.followup.send(file=discord.File(cam))
     except Exception as e:
-        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+        await interaction.followup.send(f"Erro: {e}")
 
 
 if not TOKEN_DO_DISCORD:
