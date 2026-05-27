@@ -403,16 +403,17 @@ def _safe_score(competitor: dict) -> int:
         return 0
 
 
-def _parsear_entries(entries: list) -> list:
+def _parsear_entries(entries: list, forma: dict = {}) -> list:
     resultado = []
     for entry in entries:
         team  = entry.get("team", {})
         logos = team.get("logos", [])
         stats = entry.get("stats", [])
+        nome  = team.get("displayName", "")
         resultado.append({
-            "rank": 0,  # atribuído após ordenação
+            "rank": 0,
             "team": {
-                "name": team.get("displayName", ""),
+                "name": nome,
                 "logo": logos[0]["href"] if logos else "",
             },
             "all": {
@@ -423,20 +424,83 @@ def _parsear_entries(entries: list) -> list:
             },
             "goalsDiff": _stat(stats, "pointDifferential"),
             "points":    _stat(stats, "points"),
+            "forma":     forma.get(nome, []),
         })
-    # Ordena: pontos desc → saldo de gols desc → vitórias desc
     resultado.sort(key=lambda t: (-t["points"], -t["goalsDiff"], -t["all"]["win"]))
     for i, t in enumerate(resultado, 1):
         t["rank"] = i
     return resultado
 
 
+def _buscar_forma_times(slug: str, n: int = 5) -> dict[str, list[str]]:
+    """Retorna {nome_time: ['W','D','L',...]} dos últimos n jogos finalizados."""
+    hoje   = datetime.now(tz=BRT).date()
+    inicio = (hoje - timedelta(days=56)).strftime("%Y%m%d")
+    fim    = hoje.strftime("%Y%m%d")
+    todos_eventos: list = []
+    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
+                     {"dates": f"{inicio}-{fim}", "limit": 300})
+    if data and data.get("events"):
+        todos_eventos = data["events"]
+    else:
+        d = hoje
+        for _ in range(5):
+            r = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": d.strftime("%Y%m%d")})
+            if r:
+                todos_eventos.extend(r.get("events", []))
+            d -= timedelta(days=7)
+    jogos: list = []
+    vistos: set = set()
+    for ev in todos_eventos:
+        tipo = (ev.get("status") or {}).get("type") or {}
+        if not tipo.get("completed"):
+            continue
+        comp  = (ev.get("competitions") or [{}])[0]
+        comps = comp.get("competitors") or []
+        home  = next((c for c in comps if c.get("homeAway") == "home"), {})
+        away  = next((c for c in comps if c.get("homeAway") == "away"), {})
+        gh    = _safe_score(home)
+        ga    = _safe_score(away)
+        nc    = (home.get("team") or {}).get("displayName", "")
+        nf    = (away.get("team") or {}).get("displayName", "")
+        data_ev = ev.get("date", "")
+        k = (data_ev, nc, nf)
+        if k in vistos:
+            continue
+        vistos.add(k)
+        if gh > ga:   rc, rf = "W", "L"
+        elif gh < ga: rc, rf = "L", "W"
+        else:         rc, rf = "D", "D"
+        jogos.append((data_ev, nc, rc, nf, rf))
+    jogos.sort(key=lambda x: x[0], reverse=True)
+    forma: dict[str, list[str]] = {}
+    for _, nc, rc, nf, rf in jogos:
+        if nc and len(forma.get(nc, [])) < n:
+            forma.setdefault(nc, []).append(rc)
+        if nf and len(forma.get(nf, [])) < n:
+            forma.setdefault(nf, []).append(rf)
+    return forma
+
+
+def _forma_html(resultados: list) -> str:
+    """Bolhas coloridas de forma: V=verde, E=cinza, D=vermelho."""
+    mapa = {"W": ("fw", "V"), "D": ("fd", "E"), "L": ("fl", "D")}
+    spans = "".join(
+        f'<div class="fc {cls}">{letra}</div>'
+        for r in (resultados or [])[:5]
+        for cls, letra in [mapa.get(r, ("fd", "·"))]
+    )
+    return f'<div class="forma">{spans}</div>'
+
+
 def buscar_tabela(slug: str) -> dict | None:
     """Retorna standings. Ligas com grupos → {"type":"groups","groups":[{name,teams}]}.
     Ligas normais → {"type":"league","teams":[...]}."""
-    data = _espn_get(f"{ESPN_V2}/{slug}/standings")
+    ano  = datetime.now().year
+    data = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": ano})
     if not data:
         return None
+    forma = _buscar_forma_times(slug)
     try:
         children = data.get("children", [])
 
@@ -446,7 +510,7 @@ def buscar_tabela(slug: str) -> dict | None:
             for child in children:
                 nome_grupo = child.get("name") or child.get("abbreviation") or "Grupo"
                 entries    = (child.get("standings") or {}).get("entries", [])
-                times      = _parsear_entries(entries)
+                times      = _parsear_entries(entries, forma)
                 if times:
                     grupos.append({"name": nome_grupo, "teams": times})
             return {"type": "groups", "groups": grupos} if grupos else None
@@ -462,7 +526,7 @@ def buscar_tabela(slug: str) -> dict | None:
             print(f"[ESPN] standings vazio para {slug}")
             return None
 
-        teams = _parsear_entries(entries)
+        teams = _parsear_entries(entries, forma)
         return {"type": "league", "teams": teams} if teams else None
     except Exception as e:
         print(f"[ESPN] Erro ao parsear standings {slug}: {e}")
@@ -896,7 +960,7 @@ _ZONAS_LIGA: dict[str, list] = {
         ("b1", "zc", "#ef4444", "Eliminado"),
     ],
     "CONMEBOL.SUDAMERICANA": [
-        (2,    "za", "#3b82f6", "16 avos de Final"),
+        (2,    "za", "#3b82f6", "Eliminatórias"),
         (3,    "zb", "#f59e0b", "Próxima fase"),
         ("b1", "zc", "#ef4444", "Eliminado"),
     ],
@@ -949,6 +1013,7 @@ async def gerar_tabela_png(dados: list, nome_liga: str, slug: str = "") -> str:
             f'<td>{time["all"]["lose"]}</td>'
             f'<td>{sg_str}</td>'
             f'<td class="pts">{time["points"]}</td>'
+            f'<td class="forma-col">{_forma_html(time.get("forma", []))}</td>'
             f'</tr>'
         )
 
@@ -959,39 +1024,53 @@ async def gerar_tabela_png(dados: list, nome_liga: str, slug: str = "") -> str:
 
     css = f"""
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;padding:22px;width:660px}}
+body{{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;padding:22px;width:740px}}
 .titulo{{font-size:20px;font-weight:700;color:#fff;margin-bottom:16px}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}
+table{{width:100%;border-collapse:collapse;table-layout:fixed;font-size:13px}}
+col.c-pos{{width:30px}}col.c-clube{{width:auto}}
+col.c-stat{{width:34px}}col.c-sg{{width:38px}}col.c-pts{{width:40px}}col.c-forma{{width:112px}}
 th{{color:#8892a4;font-weight:500;padding:7px 8px;border-bottom:2px solid #0f3460;
-   text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.7px}}
-th:nth-child(2){{text-align:left;padding-left:10px}}
-td{{padding:9px 8px;border-bottom:1px solid #1e2f5e;text-align:center;vertical-align:middle}}
+   text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.7px;overflow:hidden}}
+th.th-clube{{text-align:left;padding-left:10px}}
+td{{padding:9px 8px;border-bottom:1px solid #1e2f5e;text-align:center;vertical-align:middle;overflow:hidden}}
 td.time-col{{text-align:left;display:flex;align-items:center;gap:9px;padding-left:10px}}
-td.pos{{color:#8892a4;font-size:12px;width:30px}}
+td.pos{{color:#8892a4;font-size:12px}}
 td.pts{{font-weight:700;color:#fff;font-size:14px}}
+td.forma-col{{padding:6px 4px}}
 tr:hover td{{background:#1a2a5e}}
 .sigla{{background:#0f3460;color:#ccc;padding:2px 5px;border-radius:4px;font-size:10px;font-weight:700}}
 {css_zonas}
+.forma{{display:flex;gap:3px;align-items:center;justify-content:center}}
+.fc{{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;
+     justify-content:center;font-size:8px;font-weight:800;color:#fff;flex-shrink:0}}
+.fw{{background:#22c55e}}.fd{{background:#6b7280}}.fl{{background:#ef4444}}
 .legenda{{display:flex;gap:18px;margin-top:13px;font-size:11px;color:#8892a4;flex-wrap:wrap}}
 .leg{{display:flex;align-items:center;gap:5px}}
 .dot{{width:10px;height:10px;border-radius:2px}}
 """
 
     ano = datetime.now().year
+    colgroup = (
+        '<colgroup>'
+        '<col class="c-pos"><col class="c-clube">'
+        '<col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
+        '<col class="c-sg"><col class="c-pts"><col class="c-forma">'
+        '</colgroup>'
+    )
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
         f'<style>{css}</style></head><body>'
         f'<div class="titulo">🏆 {nome_liga} — Classificação {ano}</div>'
-        f'<table><thead><tr>'
-        f'<th>#</th><th style="text-align:left;padding-left:10px">Clube</th>'
-        f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th>'
+        f'<table>{colgroup}<thead><tr>'
+        f'<th>#</th><th class="th-clube">Clube</th>'
+        f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th><th>ÚLT. 5</th>'
         f'</tr></thead><tbody>{linhas}</tbody></table>'
         f'<div class="legenda">{legenda_html}</div>'
         f'</body></html>'
     )
 
     nome_arquivo = f"tabela_{nome_liga.lower().replace(' ', '')}.png"
-    return await _html_para_png(html, nome_arquivo, width=700)
+    return await _html_para_png(html, nome_arquivo, width=780)
 
 
 async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") -> str:
@@ -1011,6 +1090,14 @@ async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") 
     legenda_html = "".join(
         f'<div class="leg"><div class="dot" style="background:{cor}"></div>{label}</div>'
         for _, _, cor, label in zonas
+    )
+
+    colgroup = (
+        '<colgroup>'
+        '<col class="c-pos"><col class="c-clube">'
+        '<col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
+        '<col class="c-sg"><col class="c-pts"><col class="c-forma">'
+        '</colgroup>'
     )
 
     blocos = ""
@@ -1035,38 +1122,47 @@ async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") 
                 f'<td>{time["all"]["lose"]}</td>'
                 f'<td>{sg_str}</td>'
                 f'<td class="pts">{time["points"]}</td>'
+                f'<td class="forma-col">{_forma_html(time.get("forma", []))}</td>'
                 f'</tr>'
             )
         blocos += (
             f'<div class="grupo">'
             f'<div class="grupo-nome">{grupo["name"]}</div>'
-            f'<table><thead><tr>'
-            f'<th>#</th><th style="text-align:left;padding-left:8px">Clube</th>'
-            f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th>'
+            f'<table>{colgroup}<thead><tr>'
+            f'<th>#</th><th class="th-clube">Clube</th>'
+            f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th><th>ÚLT. 5</th>'
             f'</tr></thead><tbody>{linhas}</tbody></table>'
             f'</div>'
         )
 
     css = f"""
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;padding:22px;width:1360px}}
+body{{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;padding:22px;width:1500px}}
 .titulo{{font-size:20px;font-weight:700;color:#fff;margin-bottom:16px}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
 .grupo{{background:#1a2744;border-radius:8px;padding:12px}}
 .grupo-nome{{font-size:13px;font-weight:700;color:#93c5fd;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}}
-table{{width:100%;border-collapse:collapse;font-size:12px}}
+table{{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}}
+col.c-pos{{width:24px}}col.c-clube{{width:auto}}
+col.c-stat{{width:30px}}col.c-sg{{width:34px}}col.c-pts{{width:36px}}col.c-forma{{width:100px}}
 th{{color:#8892a4;font-weight:500;padding:5px 6px;border-bottom:2px solid #0f3460;
-   text-align:center;font-size:10px;text-transform:uppercase;letter-spacing:.5px}}
-th:nth-child(2){{text-align:left;padding-left:8px}}
-td{{padding:7px 6px;border-bottom:1px solid #1e2f5e;text-align:center;vertical-align:middle}}
+   text-align:center;font-size:10px;text-transform:uppercase;letter-spacing:.5px;overflow:hidden}}
+th.th-clube{{text-align:left;padding-left:8px}}
+td{{padding:7px 6px;border-bottom:1px solid #1e2f5e;text-align:center;vertical-align:middle;overflow:hidden}}
 td.time-col{{text-align:left;display:flex;align-items:center;gap:7px;padding-left:8px}}
-td.pos{{color:#8892a4;font-size:11px;width:24px}}
+td.pos{{color:#8892a4;font-size:11px}}
 td.pts{{font-weight:700;color:#fff;font-size:13px}}
+td.forma-col{{padding:5px 3px}}
 tr:last-child td{{border-bottom:none}}
 {css_zonas}
+.forma{{display:flex;gap:3px;align-items:center;justify-content:center}}
+.fc{{width:16px;height:16px;border-radius:50%;display:flex;align-items:center;
+     justify-content:center;font-size:7px;font-weight:800;color:#fff;flex-shrink:0}}
+.fw{{background:#22c55e}}.fd{{background:#6b7280}}.fl{{background:#ef4444}}
 .legenda{{display:flex;gap:18px;margin-top:16px;font-size:11px;color:#8892a4;flex-wrap:wrap}}
 .leg{{display:flex;align-items:center;gap:5px}}
 .dot{{width:10px;height:10px;border-radius:2px}}
+.sigla{{background:#0f3460;color:#ccc;padding:2px 4px;border-radius:3px;font-size:9px;font-weight:700}}
 """
     ano  = datetime.now().year
     html = (
@@ -1079,7 +1175,7 @@ tr:last-child td{{border-bottom:none}}
     )
 
     nome_arquivo = f"tabela_{nome_liga.lower().replace(' ', '')}_grupos.png"
-    return await _html_para_png(html, nome_arquivo, width=1400)
+    return await _html_para_png(html, nome_arquivo, width=1540)
 
 
 async def gerar_jogos_png(jogos: list, titulo: str) -> str:
