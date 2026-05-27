@@ -108,7 +108,8 @@ _partida_pages: dict[str, str] = {}
 
 
 def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
-                   bz_event_id: int | None = None) -> str:
+                   bz_event_id: int | None = None,
+                   nome_casa: str = "", nome_fora: str = "") -> str:
     token = secrets.token_urlsafe(24)
     _player_sessions[token] = {
         "stream_url":  stream_url,
@@ -116,6 +117,8 @@ def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
         "event_id":    event_id,
         "slug":        slug,
         "bz_event_id": bz_event_id,
+        "nome_casa":   nome_casa,
+        "nome_fora":   nome_fora,
     }
     print(f"[Session] criada token={token[:8]}… event={event_id} bz={bz_event_id}")
     return token
@@ -124,22 +127,37 @@ def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
 def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
     """Busca o event_id Bzzoiro para um jogo de hoje pelos nomes dos times."""
     hoje = datetime.now(tz=BRT).date()
-    leagues = [
-        (_BZ_BRASILEIRAO_LEAGUE, {}),
-        (_BZ_COPA_LEAGUE,        {"season_id": _BZ_COPA_SEASON}),
+    qh = nome_casa.lower().strip()
+    qa = nome_fora.lower().strip()
+
+    def _match(ev: dict) -> bool:
+        bh = (ev.get("home_team") or "").lower()
+        ba = (ev.get("away_team") or "").lower()
+        return (qh in bh or bh in qh) and (qa in ba or ba in qa)
+
+    # Busca por liga específica (mais precisa)
+    for league_id, extra in [
+        (_BZ_BRASILEIRAO_LEAGUE,  {}),
+        (_BZ_COPA_LEAGUE,         {"season_id": _BZ_COPA_SEASON}),
         (_BZ_LIBERTADORES_LEAGUE, {}),
         (_BZ_SULAMERICANA_LEAGUE, {}),
-    ]
-    for league_id, extra in leagues:
+    ]:
         params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
         for ev in (data or {}).get("results", []):
-            bh = (ev.get("home_team") or "").lower()
-            ba = (ev.get("away_team") or "").lower()
-            qh = nome_casa.lower(); qa = nome_fora.lower()
-            if (qh in bh or bh in qh) and (qa in ba or ba in qa):
+            if _match(ev):
+                print(f"[BZ] encontrado liga={league_id} id={ev.get('id')} {ev.get('home_team')} x {ev.get('away_team')}")
                 return ev.get("id")
+
+    # Fallback: busca ampla sem filtro de liga (cobre todas as competições)
+    data = _bzzoiro_get("events/", {"date_from": str(hoje), "date_to": str(hoje), "limit": 200})
+    for ev in (data or {}).get("results", []):
+        if _match(ev):
+            print(f"[BZ] encontrado (broad) liga={ev.get('league_id')} id={ev.get('id')} {ev.get('home_team')} x {ev.get('away_team')}")
+            return ev.get("id")
+
+    print(f"[BZ] não encontrado: '{nome_casa}' x '{nome_fora}'")
     return None
 
 
@@ -2582,10 +2600,22 @@ function renderLineups(lineups, ev) {
 }
 
 // ── Fetch & refresh ──────────────────────────────────────────────────────────
+var _fetchErrors = 0;
 async function fetchLive() {
     try {
         var r = await fetch(API+"?t="+Date.now());
-        if (!r.ok) return;
+        if (!r.ok) {
+            _fetchErrors++;
+            if (_fetchErrors === 1) {
+                var err = {};
+                try { err = await r.json(); } catch(_) {}
+                document.getElementById("dheader").innerHTML =
+                    '<div class="no-data" style="padding:16px;color:#ef4444">⚠️ ' +
+                    (err.error || "Dados indisponíveis para esta partida") + '</div>';
+            }
+            return;
+        }
+        _fetchErrors = 0;
         var d = await r.json();
         renderHeader(d.evento, d.venue, d.logos);
         renderIncidents((d.incidents||{}).incidents||[], d.evento);
@@ -2642,7 +2672,16 @@ async def _web_live_api_handler(request: aiohttp_web.Request) -> aiohttp_web.Res
         return aiohttp_web.json_response({"error": "sessão não encontrada"}, status=404, headers=_CORS_HEADERS)
     bz_id = sessao.get("bz_event_id")
     if not bz_id:
-        return aiohttp_web.json_response({"error": "sem dados Bzzoiro"}, status=404, headers=_CORS_HEADERS)
+        # Tenta encontrar o evento agora (pode não ter existido na criação da sessão)
+        nc = sessao.get("nome_casa", "")
+        nf = sessao.get("nome_fora", "")
+        if nc and nf:
+            loop = asyncio.get_event_loop()
+            bz_id = await loop.run_in_executor(None, _find_bz_event_id, nc, nf)
+            if bz_id:
+                sessao["bz_event_id"] = bz_id  # cache para próximas chamadas
+    if not bz_id:
+        return aiohttp_web.json_response({"error": "sem dados Bzzoiro para esta partida"}, status=404, headers=_CORS_HEADERS)
     loop  = asyncio.get_event_loop()
     dados = await loop.run_in_executor(None, buscar_detalhes_partida, bz_id)
     if not dados:
@@ -3093,7 +3132,7 @@ class _BotaoCanal(discord.ui.Button):
         title    = f"{self.nome_casa} × {self.nome_fora}"
         loop     = asyncio.get_event_loop()
         bz_eid   = await loop.run_in_executor(None, _find_bz_event_id, self.nome_casa, self.nome_fora)
-        token    = _criar_sessao(self.canal["url"], title, self.event_id, self.slug, bz_eid)
+        token    = _criar_sessao(self.canal["url"], title, self.event_id, self.slug, bz_eid, self.nome_casa, self.nome_fora)
         player_url = f"{SERVER_URL}/player/{token}"
         for item in self.view.children:
             item.disabled = True
@@ -3188,7 +3227,7 @@ class TransmitirButton(discord.ui.Button):
                 stream_url = canal_iptv["url"]
                 title      = f"{nome_casa} × {nome_fora}"
                 bz_eid     = await loop.run_in_executor(None, _find_bz_event_id, nome_casa, nome_fora)
-                token      = _criar_sessao(stream_url, title, self.event_id, slug, bz_eid)
+                token      = _criar_sessao(stream_url, title, self.event_id, slug, bz_eid, nome_casa, nome_fora)
                 player_url = f"{SERVER_URL}/player/{token}"
                 self.label = f"📺 {canal_iptv['name'][:20]}"
                 await interaction.message.edit(view=self.view)
