@@ -17,7 +17,8 @@ load_dotenv()
 
 TOKEN_DO_DISCORD  = os.getenv("TOKEN_DISCORD")
 CANAL_RESUMO_ID   = int(os.getenv("CANAL_JOGOS_DO_DIA", "0"))
-SERVER_PORT       = int(os.getenv("SERVER_PORT", "8080"))
+# Railway injeta PORT automaticamente; localmente usa SERVER_PORT ou 8080
+SERVER_PORT       = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
 SERVER_URL        = os.getenv("SERVER_URL", f"http://localhost:{SERVER_PORT}")
 _hora_env         = os.getenv("HORA_RESUMO_DIARIO", "09:00").split(":")
 BRT               = timezone(timedelta(hours=-3))
