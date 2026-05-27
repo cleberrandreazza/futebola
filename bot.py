@@ -410,6 +410,8 @@ def _parsear_entries(entries: list, forma: dict = {}) -> list:
         logos = team.get("logos", [])
         stats = entry.get("stats", [])
         nome  = team.get("displayName", "")
+        # forma é indexada por ID; fallback para displayName caso não haja ID
+        tid   = team.get("id", "") or nome
         resultado.append({
             "rank": 0,
             "team": {
@@ -424,7 +426,7 @@ def _parsear_entries(entries: list, forma: dict = {}) -> list:
             },
             "goalsDiff": _stat(stats, "pointDifferential"),
             "points":    _stat(stats, "points"),
-            "forma":     forma.get(nome, []),
+            "forma":     forma.get(tid, forma.get(nome, [])),
         })
     resultado.sort(key=lambda t: (-t["points"], -t["goalsDiff"], -t["all"]["win"]))
     for i, t in enumerate(resultado, 1):
@@ -468,17 +470,18 @@ def _buscar_forma_times(slug: str, n: int = 5) -> dict[str, list[str]]:
         away  = next((c for c in comps if c.get("homeAway") == "away"), {})
         gh    = _safe_score(home)
         ga    = _safe_score(away)
-        nc    = (home.get("team") or {}).get("displayName", "")
-        nf    = (away.get("team") or {}).get("displayName", "")
+        # Usar ID do time como chave — displayName difere entre scoreboard e standings
+        ic    = (home.get("team") or {}).get("id", "") or (home.get("team") or {}).get("displayName", "")
+        if_ = (away.get("team") or {}).get("id", "") or (away.get("team") or {}).get("displayName", "")
         data_ev = ev.get("date", "")
-        k = (data_ev, nc, nf)
+        k = (data_ev, ic, if_)
         if k in vistos:
             continue
         vistos.add(k)
         if gh > ga:   rc, rf = "W", "L"
         elif gh < ga: rc, rf = "L", "W"
         else:         rc, rf = "D", "D"
-        jogos.append((data_ev, nc, rc, nf, rf))
+        jogos.append((data_ev, ic, rc, if_, rf))
     jogos.sort(key=lambda x: x[0], reverse=True)
     forma: dict[str, list[str]] = {}
     for _, nc, rc, nf, rf in jogos:
