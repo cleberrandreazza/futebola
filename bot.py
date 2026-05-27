@@ -3273,36 +3273,58 @@ async def cmd_tabela_brasileirao(ctx):
     await ctx.invoke(bot.get_command("tabela"), nome_liga="brasileirao")
 
 
-@bot.command(name="liga")
-async def cmd_liga(ctx, *, nome_liga: str = "brasileirao"):
-    chave = nome_liga.lower().replace(" ", "")
-    if chave not in LIGAS:
-        await ctx.send(f"❌ Liga inválida. Opções: `{'`, `'.join(LIGAS)}`")
-        return
-    msg = await ctx.send(f"📅 Buscando jogos — **{nome_liga.title()}**...")
+async def _cmd_liga_handler(ctx, chave: str, data_str: str = ""):
+    meta         = LIGAS_META.get(chave, {"nome": chave.title(), "emoji": "🏆"})
+    nome_display = f"{meta['emoji']} {meta['nome']}"
+
+    data_yyyymmdd = None
+    data_display  = None
+    if data_str:
+        try:
+            dt            = datetime.strptime(data_str.strip(), "%d/%m/%Y")
+            data_yyyymmdd = dt.strftime("%Y%m%d")
+            data_display  = dt.strftime("%d/%m/%Y")
+        except ValueError:
+            await ctx.send(f"❌ Data inválida. Use `dd/mm/yyyy`. Ex: `!{chave} 01/06/2026`")
+            return
+
+    suffix = f" · {data_display}" if data_display else ""
+    msg    = await ctx.send(f"📅 Buscando jogos — **{nome_display}**{suffix}...")
     try:
         loop = asyncio.get_event_loop()
         if chave in LIGAS_COPA:
+            if data_yyyymmdd:
+                await msg.edit(content="❌ A Copa do Brasil não suporta consulta por data.")
+                return
             jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
         else:
-            jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
+            jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave], data_yyyymmdd)
 
-        img = await gerar_jogos_png(jogos, nome_liga.title())
+        img = await gerar_jogos_png(jogos, meta["nome"] + suffix)
         await msg.delete()
 
         slug = LIGAS.get(chave)
-        jogos_ativos = [
-            j for j in jogos
-            if j["fixture"]["status"]["short"] not in ("FT", "AET", "PEN")
-        ]
-        if jogos_ativos and slug:
-            view = SeguirView(jogos_ativos, slug)
-            await ctx.send(file=discord.File(img), view=view)
-        else:
-            await ctx.send(file=discord.File(img))
+        if not data_yyyymmdd:
+            jogos_ativos = [j for j in jogos if j["fixture"]["status"]["short"] not in ("FT", "AET", "PEN")]
+            if jogos_ativos and slug:
+                await ctx.send(file=discord.File(img), view=SeguirView(jogos_ativos, slug))
+                return
+        await ctx.send(file=discord.File(img))
     except Exception as e:
-        print(f"[!liga] Erro em {chave}: {e}")
-        await msg.edit(content=f"❌ Erro ao buscar jogos de **{nome_liga.title()}**: `{e}`")
+        print(f"[!{chave}] Erro: {e}")
+        await msg.edit(content=f"❌ Erro ao buscar jogos de **{meta['nome']}**: `{e}`")
+
+
+def _register_liga_commands():
+    def _make(chave):
+        async def _cmd(ctx, data_str: str = ""):
+            await _cmd_liga_handler(ctx, chave, data_str)
+        _cmd.__name__ = f"cmd_{chave}"
+        bot.command(name=chave)(_cmd)
+    for chave in LIGAS:
+        _make(chave)
+
+_register_liga_commands()
 
 
 @bot.command(name="hoje")
@@ -3669,8 +3691,9 @@ def _build_ajuda_embed() -> discord.Embed:
         name="📅  Jogos do Dia",
         value=(
             "`!hoje` `/hoje` — Jogos do dia em todas as ligas\n"
-            "`!calendario 01/06/2026` — Jogos de uma data específica\n"
-            "`!liga [liga]` — Jogos ao vivo e próximos de uma liga"
+            "`!brasileirao` `!premierleague` `!champions` … — Jogos da liga hoje\n"
+            "`!brasileirao 01/06/2026` — Jogos da liga em uma data específica\n"
+            "`!calendario 01/06/2026` — Jogos de todas as ligas em uma data"
         ),
         inline=False,
     )
