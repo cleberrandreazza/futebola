@@ -42,6 +42,15 @@ _BZ_ROUND_NAMES   = {
     1: "1ª Fase", 2: "2ª Fase", 3: "3ª Fase", 4: "4ª Fase",
     5: "5ª Fase", 6: "Semifinais", 7: "Final",
 }
+_BZ_LEAGUE_NAMES: dict[int, str] = {
+    9:  "Brasileirão Série A",
+    35: "Copa do Brasil",
+}
+# Mapeamento de chave de liga (LIGAS) → league_id Bzzoiro (para filtro)
+_BZ_LIGA_TO_ID: dict[str, int] = {
+    "brasileirao":  9,
+    "copadobrasil": 35,
+}
 
 # Competições de mata-mata: !tabela mostra rodada atual, não tabela de pontos
 LIGAS_COPA = {"copadobrasil"}
@@ -446,7 +455,7 @@ def _bzzoiro_ev_to_fixture(ev: dict, logo_map: dict) -> dict:
             "away": ev.get("away_score"),
         },
         "penalty": {"home": pen.get("home"), "away": pen.get("away")},
-        "meta":    {"canal": "", "liga": "Copa do Brasil"},
+        "meta":    {"canal": "", "liga": _BZ_LEAGUE_NAMES.get(ev.get("league_id") or 0, "")},
     }
 
 
@@ -500,8 +509,12 @@ def _bz_build_team_map() -> dict[str, tuple[int, str]]:
     return team_map
 
 
-def buscar_proximos_bzzoiro(nome_time: str) -> tuple[list, str] | None:
-    """Retorna (fixtures, nome_oficial) dos próximos jogos de um time via Bzzoiro, ou None."""
+def buscar_proximos_bzzoiro(
+    nome_time: str,
+    league_id_filter: int | None = None,
+) -> tuple[list, str] | None:
+    """Retorna (fixtures, nome_oficial) dos próximos jogos de um time via Bzzoiro.
+    Se league_id_filter for fornecido, retorna apenas jogos daquela liga."""
     if not BZZOIRO_TOKEN:
         return None
     team_map = _bz_build_team_map()
@@ -521,13 +534,17 @@ def buscar_proximos_bzzoiro(nome_time: str) -> tuple[list, str] | None:
         return None
     team_id, display_name = result
     hoje = datetime.now(tz=BRT).date()
-    data = _bzzoiro_get(f"teams/{team_id}/fixtures/", {"date_from": str(hoje), "limit": 5})
+    # Pede mais para compensar possíveis filtros por liga
+    limit = 10 if league_id_filter else 5
+    data  = _bzzoiro_get(f"teams/{team_id}/fixtures/", {"date_from": str(hoje), "limit": limit})
     if not data:
         return None
     logo_map = _buscar_logos_brasileiros()
     now_brt  = datetime.now(tz=BRT)
     fixtures: list = []
     for ev in data.get("results", []):
+        if league_id_filter and ev.get("league_id") != league_id_filter:
+            continue
         f        = _bzzoiro_ev_to_fixture(ev, logo_map)
         date_str = f["fixture"]["date"]
         try:
@@ -2065,16 +2082,19 @@ async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str
         b64_fora  = logos.get(j["teams"]["away"].get("logo",""),"")
         destaque  = nome_time.lower() in nome_casa.lower() or nome_time.lower() in nome_fora.lower()
 
+        liga_card  = (j.get("meta") or {}).get("liga", "")
+        liga_badge = (f'<span class="liga-badge">{liga_card}</span>' if liga_card and not nome_liga else "")
         cards += (
             f'<div class="card{" destaque" if destaque else ""}">'
             f'<div class="lado home"><span class="tnome">{nome_casa}</span>'
             f'{_img_tag(b64_casa, nome_casa, 26)}</div>'
-            f'<div class="centro"><span class="hora">{data_hora}</span></div>'
+            f'<div class="centro"><span class="hora">{data_hora}</span>{liga_badge}</div>'
             f'<div class="lado away">{_img_tag(b64_fora, nome_fora, 26)}'
             f'<span class="tnome">{nome_fora}</span></div>'
             f'</div>'
         )
 
+    sub_html = f'<div class="sub">{nome_liga}</div>' if nome_liga else ""
     css = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;width:560px;padding:20px}
@@ -2088,13 +2108,15 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 .away{justify-content:flex-start;text-align:left}
 .tnome{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
 .centro{width:110px;text-align:center;flex-shrink:0}
-.hora{color:#93c5fd;font-size:14px;font-weight:700}
+.hora{color:#93c5fd;font-size:14px;font-weight:700;display:block}
+.liga-badge{display:inline-block;margin-top:3px;background:#0f3460;color:#93c5fd;
+            padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;white-space:nowrap}
 .sigla{background:#0f3460;color:#ccc;padding:2px 5px;border-radius:4px;font-size:10px;font-weight:700}
 """
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
         f'<div class="titulo">📅 Próximos jogos — {nome_time}</div>'
-        f'<div class="sub">{nome_liga}</div>'
+        f'{sub_html}'
         f'{cards}</body></html>'
     )
     return await _html_para_png(html, "proximos_temp.png", width=600)
@@ -3213,21 +3235,38 @@ async def cmd_artilheiro(ctx, liga: str = ""):
 
 
 @bot.command(name="proximos")
-async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
-    liga = liga.lower()
-    if not liga or liga not in LIGAS or not time:
+async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
+    if not primeiro:
         ligas_disp = ", ".join(f"`{k}`" for k in LIGAS)
-        await ctx.send(f"Uso: `!proximos [liga] [time]`\nEx: `!proximos brasileirao Flamengo`\nLigas: {ligas_disp}")
+        await ctx.send(
+            f"Uso: `!proximos [time]` ou `!proximos [liga] [time]`\n"
+            f"Ex: `!proximos Flamengo` · `!proximos brasileirao Flamengo`\n"
+            f"Ligas: {ligas_disp}"
+        )
         return
-    msg  = await ctx.send(f"🔍 Buscando próximos jogos de **{time}**...")
+
+    liga_key  = primeiro.lower() if primeiro.lower() in LIGAS else None
+    nome_time = resto.strip() if liga_key else (primeiro + (" " + resto if resto else "")).strip()
+
+    if not nome_time:
+        await ctx.send(f"Informe o nome do time. Ex: `!proximos Flamengo`")
+        return
+
+    msg  = await ctx.send(f"🔍 Buscando próximos jogos de **{nome_time}**...")
     loop = asyncio.get_event_loop()
-    meta      = LIGAS_META.get(liga, {"nome": liga.title(), "emoji": "🏆"})
-    nome_liga = f"{meta['emoji']} {meta['nome']}"
 
     # Prioridade: Bzzoiro
-    bz_result = await loop.run_in_executor(None, buscar_proximos_bzzoiro, time)
+    bz_league_filter = _BZ_LIGA_TO_ID.get(liga_key) if liga_key else None
+    bz_result = await loop.run_in_executor(
+        None, buscar_proximos_bzzoiro, nome_time, bz_league_filter
+    )
     if bz_result:
         jogos, nome_oficial = bz_result
+        if liga_key:
+            meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
+            nome_liga = f"{meta['emoji']} {meta['nome']}"
+        else:
+            nome_liga = ""  # liga badge por card
         try:
             caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
             await msg.delete()
@@ -3236,20 +3275,22 @@ async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
             await msg.edit(content=f"Erro ao gerar imagem: {e}")
         return
 
-    # Fallback: ESPN (não disponível para Copa do Brasil)
-    if liga in LIGAS_COPA:
-        await msg.edit(content=f"Nenhum jogo futuro encontrado para **{time}** na Copa do Brasil.")
+    # Fallback: ESPN (apenas quando liga foi especificada e tem suporte)
+    if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
+        await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_time}**.")
         return
-    slug      = LIGAS[liga]
-    resultado = await loop.run_in_executor(None, buscar_time_id, slug, time)
+    slug      = LIGAS[liga_key]
+    resultado = await loop.run_in_executor(None, buscar_time_id, slug, nome_time)
     if not resultado:
-        await msg.edit(content=f"Time `{time}` não encontrado na liga `{liga}`.")
+        await msg.edit(content=f"Time `{nome_time}` não encontrado na liga `{liga_key}`.")
         return
     team_id, nome_oficial = resultado
     jogos = await loop.run_in_executor(None, buscar_proximos_jogos, slug, team_id)
     if not jogos:
         await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
         return
+    meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
+    nome_liga = f"{meta['emoji']} {meta['nome']}"
     try:
         caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
         await msg.delete()
@@ -3312,7 +3353,8 @@ async def cmd_ajuda(ctx):
     embed.add_field(name="!tabela [liga]",           value="Classificação da liga",                                            inline=False)
     embed.add_field(name="!chaveamento [liga]",      value="Chaveamento mata-mata (bracket). Ex: `!chaveamento champions`",     inline=False)
     embed.add_field(name="!artilheiro [liga]",       value="Top artilheiros da liga",                                          inline=False)
-    embed.add_field(name="!proximos [liga] [time]",  value="Próximos 5 jogos de um time. Ex: `!proximos brasileirao Flamengo`", inline=False)
+    embed.add_field(name="!proximos [time]",          value="Próximos 5 jogos de um time (todas as ligas). Ex: `!proximos Flamengo`", inline=False)
+    embed.add_field(name="!proximos [liga] [time]",  value="Próximos 5 jogos em uma liga específica. Ex: `!proximos brasileirao Flamengo`", inline=False)
     embed.add_field(name="!monitorando",             value="Lista jogos monitorados com botão para parar",                     inline=False)
     if IPTV_URL:
         embed.add_field(name="📺 IPTV", value=(
