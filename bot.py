@@ -35,8 +35,9 @@ ESPN_V1 = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # Bzzoiro Sports Data API — Copa do Brasil 2026
 BZZOIRO_TOKEN     = os.getenv("BZZOIRO_TOKEN", "")
 BZZOIRO_BASE      = "https://sports.bzzoiro.com/api/v2"
-_BZ_COPA_LEAGUE   = 35
-_BZ_COPA_SEASON   = 78
+_BZ_COPA_LEAGUE        = 35
+_BZ_COPA_SEASON        = 78
+_BZ_BRASILEIRAO_LEAGUE = 9
 _BZ_ROUND_NAMES   = {
     1: "1ª Fase", 2: "2ª Fase", 3: "3ª Fase", 4: "4ª Fase",
     5: "5ª Fase", 6: "Semifinais", 7: "Final",
@@ -363,6 +364,7 @@ def _bzzoiro_get(endpoint: str, params: dict = None) -> dict | None:
 
 
 _logo_cache_brasil: dict[str, str] = {}
+_bz_team_map_cache: dict[str, tuple[int, str]] = {}
 
 # Bzzoiro usa nomes diferentes dos que a ESPN usa para alguns times brasileiros
 _BZ_ESPN_ALIASES: dict[str, str] = {
@@ -459,6 +461,85 @@ def buscar_jogos_copa_hoje() -> list:
         return []
     logo_map = _buscar_logos_brasileiros()
     return [_bzzoiro_ev_to_fixture(ev, logo_map) for ev in data.get("results", [])]
+
+
+def _bz_current_season(league_id: int) -> int | None:
+    """Retorna o season_id mais recente para uma liga Bzzoiro."""
+    data = _bzzoiro_get("seasons/", {"league_id": league_id})
+    if not data:
+        return None
+    now_year = datetime.now().year
+    for s in sorted(data.get("results", []), key=lambda x: -(x.get("year", 0) or 0)):
+        if (s.get("year") or 0) >= now_year - 1:
+            return s.get("id")
+    return None
+
+
+def _bz_build_team_map() -> dict[str, tuple[int, str]]:
+    """Constrói {nome_normalizado: (team_id, nome_display)} a partir dos eventos Bzzoiro."""
+    global _bz_team_map_cache
+    if _bz_team_map_cache:
+        return _bz_team_map_cache
+    team_map: dict[str, tuple[int, str]] = {}
+    known: list[tuple[int, int | None]] = [(_BZ_COPA_LEAGUE, _BZ_COPA_SEASON)]
+    bra_season = _bz_current_season(_BZ_BRASILEIRAO_LEAGUE)
+    if bra_season:
+        known.append((_BZ_BRASILEIRAO_LEAGUE, bra_season))
+    for league_id, season_id in known:
+        params: dict = {"league_id": league_id, "limit": 200}
+        if season_id:
+            params["season_id"] = season_id
+        data = _bzzoiro_get("events/", params)
+        for ev in (data or {}).get("results", []):
+            for id_key, name_key in [("home_team_id", "home_team"), ("away_team_id", "away_team")]:
+                tid  = ev.get(id_key)
+                name = ev.get(name_key, "")
+                if tid and name:
+                    team_map[name.lower().strip()] = (tid, name)
+    _bz_team_map_cache = team_map
+    return team_map
+
+
+def buscar_proximos_bzzoiro(nome_time: str) -> tuple[list, str] | None:
+    """Retorna (fixtures, nome_oficial) dos próximos jogos de um time via Bzzoiro, ou None."""
+    if not BZZOIRO_TOKEN:
+        return None
+    team_map = _bz_build_team_map()
+    if not team_map:
+        return None
+    busca  = nome_time.lower().strip()
+    result = team_map.get(busca)
+    if not result:
+        best, best_score = None, 0
+        for norm_name, val in team_map.items():
+            if busca in norm_name or norm_name in busca:
+                score = len(set(busca) & set(norm_name))
+                if score > best_score:
+                    best_score, best = score, val
+        result = best
+    if not result:
+        return None
+    team_id, display_name = result
+    hoje = datetime.now(tz=BRT).date()
+    data = _bzzoiro_get(f"teams/{team_id}/fixtures/", {"date_from": str(hoje), "limit": 5})
+    if not data:
+        return None
+    logo_map = _buscar_logos_brasileiros()
+    now_brt  = datetime.now(tz=BRT)
+    fixtures: list = []
+    for ev in data.get("results", []):
+        f        = _bzzoiro_ev_to_fixture(ev, logo_map)
+        date_str = f["fixture"]["date"]
+        try:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(BRT)
+            if dt < now_brt:
+                continue
+        except Exception:
+            pass
+        fixtures.append(f)
+        if len(fixtures) == 5:
+            break
+    return (fixtures, display_name) if fixtures else None
 
 
 def _bzzoiro_confrontos(events: list, logo_map: dict) -> list:
@@ -3135,15 +3216,31 @@ async def cmd_artilheiro(ctx, liga: str = ""):
 async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
     liga = liga.lower()
     if not liga or liga not in LIGAS or not time:
-        ligas_disp = ", ".join(f"`{k}`" for k in LIGAS if k not in LIGAS_COPA)
+        ligas_disp = ", ".join(f"`{k}`" for k in LIGAS)
         await ctx.send(f"Uso: `!proximos [liga] [time]`\nEx: `!proximos brasileirao Flamengo`\nLigas: {ligas_disp}")
         return
-    if liga in LIGAS_COPA:
-        await ctx.send("Próximos jogos da Copa do Brasil não disponíveis.")
-        return
-    slug = LIGAS[liga]
-    msg = await ctx.send(f"🔍 Buscando próximos jogos de **{time}**...")
+    msg  = await ctx.send(f"🔍 Buscando próximos jogos de **{time}**...")
     loop = asyncio.get_event_loop()
+    meta      = LIGAS_META.get(liga, {"nome": liga.title(), "emoji": "🏆"})
+    nome_liga = f"{meta['emoji']} {meta['nome']}"
+
+    # Prioridade: Bzzoiro
+    bz_result = await loop.run_in_executor(None, buscar_proximos_bzzoiro, time)
+    if bz_result:
+        jogos, nome_oficial = bz_result
+        try:
+            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+            await msg.delete()
+            await ctx.send(file=discord.File(caminho))
+        except Exception as e:
+            await msg.edit(content=f"Erro ao gerar imagem: {e}")
+        return
+
+    # Fallback: ESPN (não disponível para Copa do Brasil)
+    if liga in LIGAS_COPA:
+        await msg.edit(content=f"Nenhum jogo futuro encontrado para **{time}** na Copa do Brasil.")
+        return
+    slug      = LIGAS[liga]
     resultado = await loop.run_in_executor(None, buscar_time_id, slug, time)
     if not resultado:
         await msg.edit(content=f"Time `{time}` não encontrado na liga `{liga}`.")
@@ -3153,8 +3250,6 @@ async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
     if not jogos:
         await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
         return
-    meta = LIGAS_META.get(liga, {"nome": liga.title(), "emoji": "🏆"})
-    nome_liga = f"{meta['emoji']} {meta['nome']}"
     try:
         caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
         await msg.delete()
