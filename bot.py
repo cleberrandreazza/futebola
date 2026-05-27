@@ -1879,13 +1879,13 @@ class _BotaoCanal(discord.ui.Button):
         self.nome_fora = nome_fora
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
         title      = f"{self.nome_casa} × {self.nome_fora}"
         token      = _criar_sessao(self.canal["url"], title, self.event_id, self.slug)
         player_url = f"{SERVER_URL}/player/{token}"
         for item in self.view.children:
             item.disabled = True
-        await interaction.message.edit(view=self.view)
+        # edit_message edita a mensagem efêmera do seletor desabilitando os botões
+        await interaction.response.edit_message(view=self.view)
         await interaction.followup.send(
             f"📺 **{title}**\nCanal: **{self.canal['name']}**\n{player_url}",
             ephemeral=False,
