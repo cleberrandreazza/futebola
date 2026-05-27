@@ -97,6 +97,9 @@ _ts_cache_iptv: float = 0.0
 # token -> {"stream_url": str, "title": str, "event_id": str, "slug": str}
 _player_sessions: dict[str, dict] = {}
 
+# token -> HTML string (página de detalhes de partida)
+_partida_pages: dict[str, str] = {}
+
 
 def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str) -> str:
     token = secrets.token_urlsafe(24)
@@ -2352,6 +2355,24 @@ async def _web_player_handler(request: aiohttp_web.Request) -> aiohttp_web.Respo
     return aiohttp_web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
+async def _web_partida_html_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    token = request.match_info.get("token", "")
+    html  = _partida_pages.get(token)
+    if not html:
+        return aiohttp_web.Response(
+            text="<h2>⛔ Página não encontrada ou expirada.</h2>",
+            content_type="text/html", status=404,
+        )
+    return aiohttp_web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+def _publicar_partida_web(html: str) -> str:
+    """Armazena HTML de partida e retorna URL de acesso."""
+    token = secrets.token_urlsafe(12)
+    _partida_pages[token] = html
+    return f"{SERVER_URL}/partida/{token}"
+
+
 async def _proxy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
     """Proxy streaming — resolve CORS, pipe de chunks para TS ao vivo."""
     token = request.match_info.get("token", "")
@@ -2417,9 +2438,10 @@ async def _proxy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
 
 async def _iniciar_servidor_web():
     app = aiohttp_web.Application()
-    app.router.add_get("/player/{token}", _web_player_handler)
-    app.router.add_get("/proxy/{token}",  _proxy_handler)
-    app.router.add_get("/proxy",          _proxy_handler)   # segmentos reescritos do M3U8
+    app.router.add_get("/player/{token}",  _web_player_handler)
+    app.router.add_get("/partida/{token}", _web_partida_html_handler)
+    app.router.add_get("/proxy/{token}",   _proxy_handler)
+    app.router.add_get("/proxy",           _proxy_handler)   # segmentos reescritos do M3U8
     app.router.add_options("/proxy/{token}", lambda r: aiohttp_web.Response(headers=_CORS_HEADERS))
     app.router.add_options("/proxy",         lambda r: aiohttp_web.Response(headers=_CORS_HEADERS))
     runner = aiohttp_web.AppRunner(app)
@@ -3464,7 +3486,7 @@ def _bz_sv(side: dict, *keys) -> float:
     return 0.0
 
 
-async def gerar_partida_png(dados: dict) -> str:
+async def _gerar_partida_html(dados: dict) -> str:
     evento       = dados.get("evento") or {}
     lineups_d    = dados.get("lineups") or {}
     stats_raw    = (dados.get("stats") or {}).get("stats") or {}
@@ -3661,55 +3683,66 @@ async def gerar_partida_png(dados: dict) -> str:
     # ── CSS ──
     css = """
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;width:680px}
-.header{background:#16213e;padding:20px 24px;text-align:center}
-.comp-line{font-size:12px;color:#8892a4;margin-bottom:14px}
-.score-row{display:flex;align-items:center;justify-content:center}
-.team-box{flex:1;display:flex;flex-direction:column;align-items:center;gap:8px}
-.tname{font-size:14px;font-weight:600;text-align:center;max-width:140px}
-.score-mid{width:180px;text-align:center;flex-shrink:0}
-.score-big{font-size:50px;font-weight:800;color:#fff;letter-spacing:3px}
-.ht-txt{font-size:12px;color:#8892a4;margin-top:2px}
-.badge{display:inline-block;padding:3px 14px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;margin-top:8px}
-.venue-row{font-size:12px;color:#8892a4;margin-top:12px}
-.section{border-top:2px solid #0d1b2a}
-.sec-title{background:#1a2a5e;color:#93c5fd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:8px 20px}
-.inc-hdr,.inc-row{display:flex;align-items:center;padding:0 16px}
-.inc-h{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:7px 8px;font-size:13px}
-.inc-a{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:7px 8px;font-size:13px}
-.inc-m{width:64px;text-align:center;color:#93c5fd;font-size:12px;font-weight:700;flex-shrink:0}
+body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh}
+.wrap{max-width:820px;margin:0 auto;padding:16px}
+.header{background:#16213e;border-radius:12px;padding:24px;text-align:center;margin-bottom:4px}
+.comp-line{font-size:13px;color:#8892a4;margin-bottom:16px}
+.score-row{display:flex;align-items:center;justify-content:center;gap:8px}
+.team-box{flex:1;display:flex;flex-direction:column;align-items:center;gap:10px}
+.tname{font-size:16px;font-weight:700;text-align:center}
+.score-mid{min-width:180px;text-align:center;flex-shrink:0}
+.score-big{font-size:60px;font-weight:800;color:#fff;letter-spacing:4px}
+.ht-txt{font-size:13px;color:#8892a4;margin-top:4px}
+.badge{display:inline-block;padding:4px 16px;border-radius:14px;font-size:12px;font-weight:700;color:#fff;margin-top:10px}
+.venue-row{font-size:13px;color:#8892a4;margin-top:14px}
+.section{border-radius:12px;overflow:hidden;margin-top:8px}
+.sec-title{background:#1a2a5e;color:#93c5fd;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:10px 20px}
+.inc-hdr,.inc-row{display:flex;align-items:center;padding:0 16px;background:#16213e}
+.inc-h{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:8px 8px;font-size:14px}
+.inc-a{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:8px 8px;font-size:14px}
+.inc-m{width:68px;text-align:center;color:#93c5fd;font-size:13px;font-weight:700;flex-shrink:0}
 .inc-row{border-bottom:1px solid #111827}
-.inc-sub .inc-h,.inc-sub .inc-a{font-size:11px;color:#8892a4}
-.ic{font-size:16px;flex-shrink:0}
-.assist{color:#8892a4;font-size:11px}
-.cg{color:#ef4444;font-size:10px;font-weight:700}
+.inc-sub .inc-h,.inc-sub .inc-a{font-size:12px;color:#8892a4}
+.ic{font-size:18px;flex-shrink:0}
+.assist{color:#8892a4;font-size:12px}
+.cg{color:#ef4444;font-size:11px;font-weight:700}
 .sub-in{color:#10b981}
 .sub-out{color:#ef4444}
-.period-sep{background:#0f1c33;color:#8892a4;text-align:center;font-size:11px;padding:7px;letter-spacing:1px}
-.stats-body{background:#16213e;padding:6px 20px 10px}
-.stat-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #0f1c33}
-.sv{width:52px;font-size:13px;font-weight:700;flex-shrink:0}
+.period-sep{background:#0f1c33;color:#8892a4;text-align:center;font-size:12px;padding:8px;letter-spacing:1px}
+.stats-body{background:#16213e;padding:8px 24px 14px}
+.stat-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #0f1c33}
+.sv{width:56px;font-size:14px;font-weight:700;flex-shrink:0}
 .sh{text-align:right;color:#60a5fa}
 .sa{text-align:left;color:#fbbf24}
-.sbar{flex:1;height:5px;background:#0f3460;border-radius:3px;overflow:hidden}
+.sbar{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}
 .sb-h{background:#3b82f6;height:100%;float:right}
 .sb-a{background:#f59e0b;height:100%;float:left}
-.slabel{width:140px;text-align:center;font-size:11px;color:#8892a4;flex-shrink:0}
-.lineups-row{display:flex;background:#16213e;padding:12px 0}
-.lu-col{flex:1;padding:8px 18px}
+.slabel{width:150px;text-align:center;font-size:12px;color:#8892a4;flex-shrink:0}
+.lineups-row{display:flex;background:#16213e;padding:16px 0}
+.lu-col{flex:1;padding:10px 20px}
 .lu-col-away{text-align:right}
 .lu-div{width:1px;background:#1e2f5e;flex-shrink:0}
-.lu-head{font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #1e2f5e}
-.pl-row{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid #0f1c33;font-size:12px}
+.lu-head{font-size:13px;color:#93c5fd;font-weight:700;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #1e2f5e}
+.pl-row{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #0f1c33;font-size:13px}
 .pl-away{justify-content:flex-end}
-.pl-jersey{width:24px;height:24px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#93c5fd;flex-shrink:0;line-height:24px;text-align:center}
-.pl-pos{font-size:9px;color:#8892a4;width:14px;flex-shrink:0;text-align:center}
-.pl-name{font-size:12px;font-weight:500}
+.pl-jersey{width:26px;height:26px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#93c5fd;flex-shrink:0;line-height:26px;text-align:center}
+.pl-pos{font-size:10px;color:#8892a4;width:16px;flex-shrink:0;text-align:center}
+.pl-name{font-size:13px;font-weight:500}
+.footer{text-align:center;font-size:11px;color:#4b5563;padding:16px 0 8px}
 """
 
-    html = (f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
-            f'{html_header}{html_incidents}{html_stats}{html_lineups}</body></html>')
-    return await _html_para_png(html, "partida_temp.png", width=680)
+    html = (
+        f'<!DOCTYPE html><html lang="pt-BR"><head>'
+        f'<meta charset="UTF-8">'
+        f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{home_name} × {away_name}</title>'
+        f'<style>{css}</style></head><body>'
+        f'<div class="wrap">'
+        f'{html_header}{html_incidents}{html_stats}{html_lineups}'
+        f'<div class="footer">Dados: Bzzoiro Sports Data</div>'
+        f'</div></body></html>'
+    )
+    return html
 
 
 def _buscar_partidas_passadas(nome_time: str, dias: int = 60) -> tuple[list[dict], str] | None:
@@ -3862,8 +3895,11 @@ class PartidaSelectView(discord.ui.View):
             await interaction.followup.send("❌ Detalhes não disponíveis.", ephemeral=True)
             return
         try:
-            cam = await gerar_partida_png(dados)
-            await interaction.followup.send(file=discord.File(cam))
+            html = await _gerar_partida_html(dados)
+            url  = _publicar_partida_web(html)
+            ev   = dados.get("evento") or {}
+            titulo = f"{ev.get('home_team','?')} × {ev.get('away_team','?')}"
+            await interaction.followup.send(f"📄 **{titulo}**\n🔗 {url}")
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
 
@@ -3884,11 +3920,13 @@ async def cmd_partida(ctx, *, query: str = ""):
         await msg.edit(content="❌ Detalhes não disponíveis para esta partida.")
         return
     try:
-        caminho = await gerar_partida_png(dados)
-        await msg.delete()
-        await ctx.send(file=discord.File(caminho))
+        html   = await _gerar_partida_html(dados)
+        url    = _publicar_partida_web(html)
+        ev     = dados.get("evento") or {}
+        titulo = f"{ev.get('home_team','?')} × {ev.get('away_team','?')}"
+        await msg.edit(content=f"📄 **{titulo}**\n🔗 {url}")
     except Exception as e:
-        await msg.edit(content=f"Erro ao gerar imagem: {e}")
+        await msg.edit(content=f"Erro ao gerar página: {e}")
 
 
 @bot.command(name="historico")
@@ -4147,8 +4185,11 @@ async def slash_partida(interaction: discord.Interaction, time: str):
         await interaction.followup.send("❌ Detalhes não disponíveis.")
         return
     try:
-        cam = await gerar_partida_png(dados)
-        await interaction.followup.send(file=discord.File(cam))
+        html   = await _gerar_partida_html(dados)
+        url    = _publicar_partida_web(html)
+        ev     = dados.get("evento") or {}
+        titulo = f"{ev.get('home_team','?')} × {ev.get('away_team','?')}"
+        await interaction.followup.send(f"📄 **{titulo}**\n🔗 {url}")
     except Exception as e:
         await interaction.followup.send(f"Erro: {e}")
 
