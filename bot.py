@@ -627,15 +627,27 @@ def _e_hoje(date_str: str) -> bool:
         return True   # em caso de erro, inclui o jogo
 
 
-def buscar_jogos_do_dia(slug: str) -> list:
-    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard")
+def buscar_jogos_do_dia(slug: str, data_yyyymmdd: str = None) -> list:
+    """Busca jogos de uma liga. data_yyyymmdd=None → hoje; caso contrário usa a data fornecida."""
+    params = {"dates": data_yyyymmdd} if data_yyyymmdd else None
+    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", params)
     if not data:
         return []
+
+    if data_yyyymmdd:
+        dt_alvo = datetime.strptime(data_yyyymmdd, "%Y%m%d").date()
+        def _filtro(d: str) -> bool:
+            try:
+                return datetime.fromisoformat(d.replace("Z", "+00:00")).astimezone(BRT).date() == dt_alvo
+            except Exception:
+                return True
+    else:
+        _filtro = _e_hoje
+
     try:
         jogos = []
         for ev in data.get("events", []):
-            # Filtra jogos que não são de hoje (ESPN às vezes devolve próximo jogo agendado)
-            if not _e_hoje(ev.get("date", "")):
+            if not _filtro(ev.get("date", "")):
                 continue
             comp = (ev.get("competitions") or [{}])[0]
             competitors = comp.get("competitors") or []
@@ -1250,10 +1262,11 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 # RESUMO DIÁRIO — imagem consolidada de todas as ligas
 # ==========================================
 
-async def gerar_resumo_diario_png(jogos_por_liga: dict) -> str:
+async def gerar_resumo_diario_png(jogos_por_liga: dict, data_display: str = None) -> str:
     """
     jogos_por_liga: {"brasileirao": [...], "premierleague": [...], ...}
     Gera uma única imagem com todos os jogos do dia agrupados por liga.
+    data_display: data formatada para exibição (ex: "28/05/2026"); None = hoje.
     """
     # Coleta todas as URLs de logos de uma vez e baixa em paralelo
     todas_urls = list({
@@ -1327,7 +1340,12 @@ async def gerar_resumo_diario_png(jogos_por_liga: dict) -> str:
     if not secoes_html:
         secoes_html = '<div class="vazio">Nenhum jogo encontrado para hoje em nenhuma liga.</div>'
 
-    data_hoje = datetime.now(tz=BRT).strftime("%A, %d de %B de %Y").capitalize()
+    if data_display:
+        data_hoje = data_display
+        titulo_img = f"📅 Jogos de {data_display}"
+    else:
+        data_hoje = datetime.now(tz=BRT).strftime("%A, %d de %B de %Y").capitalize()
+        titulo_img = "⚽ Jogos do Dia"
 
     css = """
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1361,7 +1379,7 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
         f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
         f'<style>{css}</style></head><body>'
         f'<div class="cabecalho">'
-        f'  <div class="titulo">⚽ Jogos do Dia</div>'
+        f'  <div class="titulo">{titulo_img}</div>'
         f'  <div class="data">{data_hoje} · {total_jogos} jogos em {len(jogos_por_liga)} ligas</div>'
         f'</div>'
         f'{secoes_html}'
@@ -2132,6 +2150,48 @@ async def cmd_hoje(ctx):
     )
 
 
+@bot.command(name="calendario")
+async def cmd_calendario(ctx, data_str: str = None):
+    if not data_str:
+        await ctx.send("Uso: `!calendario dd/mm/yyyy`\nEx: `!calendario 01/06/2026`")
+        return
+
+    try:
+        dt = datetime.strptime(data_str, "%d/%m/%Y")
+    except ValueError:
+        await ctx.send("❌ Data inválida. Use o formato `dd/mm/yyyy`. Ex: `!calendario 01/06/2026`")
+        return
+
+    data_yyyymmdd = dt.strftime("%Y%m%d")
+    data_display  = dt.strftime("%d/%m/%Y")
+
+    msg = await ctx.send(f"📅 Buscando jogos de **{data_display}**...")
+    loop = asyncio.get_event_loop()
+    jogos_por_liga = {}
+    for chave in LIGAS_RESUMO:
+        if chave in LIGAS_COPA:
+            continue  # Copa do Brasil não suporta consulta por data via ESPN
+        try:
+            jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave], data_yyyymmdd)
+            if jogos:
+                jogos_por_liga[chave] = jogos
+        except Exception as e:
+            print(f"[!calendario] Erro em {chave}: {e}")
+
+    await msg.delete()
+
+    if not jogos_por_liga:
+        await ctx.send(f"📭 Nenhum jogo encontrado em **{data_display}** nas ligas monitoradas.")
+        return
+
+    total = sum(len(v) for v in jogos_por_liga.values())
+    img   = await gerar_resumo_diario_png(jogos_por_liga, data_display=data_display)
+    await ctx.send(
+        content=f"📅 **Jogos de {data_display}** — {total} partidas em {len(jogos_por_liga)} ligas",
+        file=discord.File(img),
+    )
+
+
 @bot.command(name="seguir")
 async def cmd_seguir(ctx, nome_liga: str, event_id: str):
     chave = nome_liga.lower().replace(" ", "")
@@ -2330,6 +2390,7 @@ async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
 async def cmd_ajuda(ctx):
     embed = discord.Embed(title="⚽ Football Bot — Comandos", color=0x3B82F6)
     embed.add_field(name="!hoje",                    value="Jogos do dia em todas as ligas (imagem)",                          inline=False)
+    embed.add_field(name="!calendario dd/mm/yyyy",  value="Jogos de uma data específica. Ex: `!calendario 01/06/2026`",          inline=False)
     embed.add_field(name="!liga [liga]",             value="Jogos da liga — botões para monitorar, ver detalhes e transmitir",  inline=False)
     embed.add_field(name="!tabela [liga]",           value="Classificação da liga",                                            inline=False)
     embed.add_field(name="!artilheiro [liga]",       value="Top artilheiros da liga",                                          inline=False)
