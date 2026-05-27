@@ -394,18 +394,54 @@ def _safe_score(competitor: dict) -> int:
         return 0
 
 
-def buscar_tabela(slug: str) -> list | None:
+def _parsear_entries(entries: list) -> list:
+    resultado = []
+    for i, entry in enumerate(entries, 1):
+        team  = entry.get("team", {})
+        logos = team.get("logos", [])
+        stats = entry.get("stats", [])
+        resultado.append({
+            "rank": i,
+            "team": {
+                "name": team.get("displayName", ""),
+                "logo": logos[0]["href"] if logos else "",
+            },
+            "all": {
+                "played": _stat(stats, "gamesPlayed"),
+                "win":    _stat(stats, "wins"),
+                "draw":   _stat(stats, "ties"),
+                "lose":   _stat(stats, "losses"),
+            },
+            "goalsDiff": _stat(stats, "pointDifferential"),
+            "points":    _stat(stats, "points"),
+        })
+    return resultado
+
+
+def buscar_tabela(slug: str) -> dict | None:
+    """Retorna standings. Ligas com grupos → {"type":"groups","groups":[{name,teams}]}.
+    Ligas normais → {"type":"league","teams":[...]}."""
     data = _espn_get(f"{ESPN_V2}/{slug}/standings")
     if not data:
         return None
     try:
-        # Estrutura real: data.children[0].standings.entries
-        entries = []
         children = data.get("children", [])
+
+        # Múltiplos filhos = liga com grupos (Libertadores, Champions, etc.)
+        if len(children) > 1:
+            grupos = []
+            for child in children:
+                nome_grupo = child.get("name") or child.get("abbreviation") or "Grupo"
+                entries    = (child.get("standings") or {}).get("entries", [])
+                times      = _parsear_entries(entries)
+                if times:
+                    grupos.append({"name": nome_grupo, "teams": times})
+            return {"type": "groups", "groups": grupos} if grupos else None
+
+        # Um único filho ou fallback direto
+        entries = []
         if children:
             entries = (children[0].get("standings") or {}).get("entries", [])
-
-        # Fallback: data.standings.entries (algumas ligas menores)
         if not entries:
             entries = (data.get("standings") or {}).get("entries", [])
 
@@ -413,27 +449,8 @@ def buscar_tabela(slug: str) -> list | None:
             print(f"[ESPN] standings vazio para {slug}")
             return None
 
-        resultado = []
-        for i, entry in enumerate(entries, 1):
-            team = entry.get("team", {})
-            logos = team.get("logos", [])
-            stats = entry.get("stats", [])
-            resultado.append({
-                "rank": i,
-                "team": {
-                    "name": team.get("displayName", ""),
-                    "logo": logos[0]["href"] if logos else "",
-                },
-                "all": {
-                    "played": _stat(stats, "gamesPlayed"),
-                    "win":    _stat(stats, "wins"),
-                    "draw":   _stat(stats, "ties"),
-                    "lose":   _stat(stats, "losses"),
-                },
-                "goalsDiff": _stat(stats, "pointDifferential"),
-                "points":    _stat(stats, "points"),
-            })
-        return resultado or None
+        teams = _parsear_entries(entries)
+        return {"type": "league", "teams": teams} if teams else None
     except Exception as e:
         print(f"[ESPN] Erro ao parsear standings {slug}: {e}")
         return None
@@ -833,14 +850,14 @@ _ZONAS_LIGA: dict[str, list] = {
         ("b8", "zc", "#ef4444", "Eliminado"),
     ],
     "CONMEBOL.LIBERTADORES": [
-        (8,    "za", "#3b82f6", "Oitavas diretas"),
-        (24,   "zb", "#f59e0b", "Playoffs"),
-        ("b12","zc", "#ef4444", "Eliminado"),
+        (2,    "za", "#3b82f6", "Oitavas de Final"),
+        (3,    "zb", "#f59e0b", "Copa Sudamericana"),
+        ("b1", "zc", "#ef4444", "Eliminado"),
     ],
     "CONMEBOL.SUDAMERICANA": [
-        (8,    "za", "#3b82f6", "16 avos diretos"),
-        (24,   "zb", "#f59e0b", "Playoffs"),
-        ("b8", "zc", "#ef4444", "Eliminado"),
+        (2,    "za", "#3b82f6", "16 avos de Final"),
+        (3,    "zb", "#f59e0b", "Próxima fase"),
+        ("b1", "zc", "#ef4444", "Eliminado"),
     ],
 }
 
@@ -930,6 +947,94 @@ tr:hover td{{background:#1a2a5e}}
 
     nome_arquivo = f"tabela_{nome_liga.lower().replace(' ', '')}.png"
     return await _html_para_png(html, nome_arquivo, width=700)
+
+
+async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") -> str:
+    """Gera imagem da tabela com múltiplos grupos (Libertadores, etc.) em grid 2 colunas."""
+    todas_urls = [
+        t["team"].get("logo", "")
+        for g in grupos for t in g["teams"]
+    ]
+    logos = await _baixar_logos_paralelo(todas_urls)
+
+    zonas = _ZONAS_LIGA.get(slug, _ZONAS_LIGA["CONMEBOL.LIBERTADORES"])
+
+    css_zonas = ""
+    for _, cls, cor, _ in zonas:
+        css_zonas += f"tr.{cls} td:first-child{{border-left:3px solid {cor}}}\n"
+
+    legenda_html = "".join(
+        f'<div class="leg"><div class="dot" style="background:{cor}"></div>{label}</div>'
+        for _, _, cor, label in zonas
+    )
+
+    blocos = ""
+    for grupo in grupos:
+        times  = grupo["teams"]
+        total  = len(times)
+        linhas = ""
+        for time in times:
+            rank   = time["rank"]
+            nome   = time["team"]["name"]
+            b64    = logos.get(time["team"].get("logo", ""), "")
+            zona   = _zona_rank(rank, total, zonas)
+            sg     = time["goalsDiff"]
+            sg_str = f"+{sg}" if sg > 0 else str(sg)
+            linhas += (
+                f'<tr class="{zona}">'
+                f'<td class="pos">{rank}</td>'
+                f'<td class="time-col">{_img_tag(b64, nome, 18)}<span>{nome}</span></td>'
+                f'<td>{time["all"]["played"]}</td>'
+                f'<td>{time["all"]["win"]}</td>'
+                f'<td>{time["all"]["draw"]}</td>'
+                f'<td>{time["all"]["lose"]}</td>'
+                f'<td>{sg_str}</td>'
+                f'<td class="pts">{time["points"]}</td>'
+                f'</tr>'
+            )
+        blocos += (
+            f'<div class="grupo">'
+            f'<div class="grupo-nome">{grupo["name"]}</div>'
+            f'<table><thead><tr>'
+            f'<th>#</th><th style="text-align:left;padding-left:8px">Clube</th>'
+            f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th>'
+            f'</tr></thead><tbody>{linhas}</tbody></table>'
+            f'</div>'
+        )
+
+    css = f"""
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;padding:22px;width:1360px}}
+.titulo{{font-size:20px;font-weight:700;color:#fff;margin-bottom:16px}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+.grupo{{background:#1a2744;border-radius:8px;padding:12px}}
+.grupo-nome{{font-size:13px;font-weight:700;color:#93c5fd;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}
+th{{color:#8892a4;font-weight:500;padding:5px 6px;border-bottom:2px solid #0f3460;
+   text-align:center;font-size:10px;text-transform:uppercase;letter-spacing:.5px}}
+th:nth-child(2){{text-align:left;padding-left:8px}}
+td{{padding:7px 6px;border-bottom:1px solid #1e2f5e;text-align:center;vertical-align:middle}}
+td.time-col{{text-align:left;display:flex;align-items:center;gap:7px;padding-left:8px}}
+td.pos{{color:#8892a4;font-size:11px;width:24px}}
+td.pts{{font-weight:700;color:#fff;font-size:13px}}
+tr:last-child td{{border-bottom:none}}
+{css_zonas}
+.legenda{{display:flex;gap:18px;margin-top:16px;font-size:11px;color:#8892a4;flex-wrap:wrap}}
+.leg{{display:flex;align-items:center;gap:5px}}
+.dot{{width:10px;height:10px;border-radius:2px}}
+"""
+    ano  = datetime.now().year
+    html = (
+        f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        f'<style>{css}</style></head><body>'
+        f'<div class="titulo">🏆 {nome_liga} — Fase de Grupos {ano}</div>'
+        f'<div class="grid">{blocos}</div>'
+        f'<div class="legenda">{legenda_html}</div>'
+        f'</body></html>'
+    )
+
+    nome_arquivo = f"tabela_{nome_liga.lower().replace(' ', '')}_grupos.png"
+    return await _html_para_png(html, nome_arquivo, width=1400)
 
 
 async def gerar_jogos_png(jogos: list, titulo: str) -> str:
@@ -1854,12 +1959,16 @@ async def cmd_tabela(ctx, *, nome_liga: str = "brasileirao"):
 
     msg = await ctx.send(f"📊 Gerando tabela do **{nome_liga.title()}**...")
     try:
-        loop = asyncio.get_event_loop()
+        loop  = asyncio.get_event_loop()
         dados = await loop.run_in_executor(None, buscar_tabela, LIGAS[chave])
         if not dados:
             await msg.edit(content="❌ Sem dados para esta liga. Tente outra ou aguarde a temporada começar.")
             return
-        img = await gerar_tabela_png(dados, nome_liga.title(), slug=LIGAS[chave])
+        slug = LIGAS[chave]
+        if dados["type"] == "groups":
+            img = await gerar_tabela_grupos_png(dados["groups"], nome_liga.title(), slug=slug)
+        else:
+            img = await gerar_tabela_png(dados["teams"], nome_liga.title(), slug=slug)
         await msg.delete()
         await ctx.send(file=discord.File(img))
     except Exception as e:
