@@ -2066,7 +2066,7 @@ async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str
         destaque  = nome_time.lower() in nome_casa.lower() or nome_time.lower() in nome_fora.lower()
 
         cards += (
-            f'<div class="card{"destaque" if destaque else ""}">'
+            f'<div class="card{" destaque" if destaque else ""}">'
             f'<div class="lado home"><span class="tnome">{nome_casa}</span>'
             f'{_img_tag(b64_casa, nome_casa, 26)}</div>'
             f'<div class="centro"><span class="hora">{data_hora}</span></div>'
@@ -2082,7 +2082,7 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 .sub{font-size:12px;color:#8892a4;margin-bottom:14px}
 .card{display:flex;align-items:center;background:#1a2a5e;margin-bottom:7px;
       padding:11px 14px;border-radius:9px;gap:6px}
-.carddestaque{border-left:3px solid #3b82f6;background:#1e3270}
+.card.destaque{border-left:3px solid #3b82f6;background:#1e3270}
 .lado{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
 .home{justify-content:flex-end;text-align:right}
 .away{justify-content:flex-start;text-align:left}
