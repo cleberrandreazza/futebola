@@ -435,20 +435,27 @@ def _parsear_entries(entries: list, forma: dict = {}) -> list:
 def _buscar_forma_times(slug: str, n: int = 5) -> dict[str, list[str]]:
     """Retorna {nome_time: ['W','D','L',...]} dos últimos n jogos finalizados."""
     hoje   = datetime.now(tz=BRT).date()
-    inicio = (hoje - timedelta(days=56)).strftime("%Y%m%d")
+    inicio = (hoje - timedelta(days=90)).strftime("%Y%m%d")
     fim    = hoje.strftime("%Y%m%d")
     todos_eventos: list = []
     data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
-                     {"dates": f"{inicio}-{fim}", "limit": 300})
+                     {"dates": f"{inicio}-{fim}", "limit": 500})
     if data and data.get("events"):
         todos_eventos = data["events"]
-    else:
+
+    # Fallback: busca por data individual a cada 3 dias (cobre ~10 rodadas)
+    if len(todos_eventos) < 10:
+        vistos_ids: set = set(ev.get("id", "") for ev in todos_eventos)
         d = hoje
-        for _ in range(5):
+        for _ in range(30):
             r = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": d.strftime("%Y%m%d")})
             if r:
-                todos_eventos.extend(r.get("events", []))
-            d -= timedelta(days=7)
+                for ev in r.get("events", []):
+                    eid = ev.get("id", "")
+                    if eid and eid not in vistos_ids:
+                        vistos_ids.add(eid)
+                        todos_eventos.append(ev)
+            d -= timedelta(days=3)
     jogos: list = []
     vistos: set = set()
     for ev in todos_eventos:
@@ -483,11 +490,12 @@ def _buscar_forma_times(slug: str, n: int = 5) -> dict[str, list[str]]:
 
 
 def _forma_html(resultados: list) -> str:
-    """Bolhas coloridas de forma: V=verde, E=cinza, D=vermelho."""
+    """Bolhas coloridas de forma: V=verde, E=cinza, D=vermelho. Mais antigo à esquerda, mais recente à direita."""
     mapa = {"W": ("fw", "V"), "D": ("fd", "E"), "L": ("fl", "D")}
+    # resultados[0] = mais recente; invertemos para exibir mais antigo → mais recente
     spans = "".join(
         f'<div class="fc {cls}">{letra}</div>'
-        for r in (resultados or [])[:5]
+        for r in reversed((resultados or [])[:5])
         for cls, letra in [mapa.get(r, ("fd", "·"))]
     )
     return f'<div class="forma">{spans}</div>'
@@ -1012,12 +1020,12 @@ async def gerar_tabela_png(dados: list, nome_liga: str, slug: str = "") -> str:
             f'<tr class="{zona}">'
             f'<td class="pos">{rank}</td>'
             f'<td class="time-col">{_img_tag(b64, nome, 22)}<span>{nome}</span></td>'
+            f'<td class="pts">{time["points"]}</td>'
             f'<td>{time["all"]["played"]}</td>'
             f'<td>{time["all"]["win"]}</td>'
             f'<td>{time["all"]["draw"]}</td>'
             f'<td>{time["all"]["lose"]}</td>'
             f'<td>{sg_str}</td>'
-            f'<td class="pts">{time["points"]}</td>'
             f'<td class="forma-col">{_forma_html(time.get("forma", []))}</td>'
             f'</tr>'
         )
@@ -1058,8 +1066,8 @@ tr:hover td{{background:#1a2a5e}}
     colgroup = (
         '<colgroup>'
         '<col class="c-pos"><col class="c-clube">'
-        '<col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
-        '<col class="c-sg"><col class="c-pts"><col class="c-forma">'
+        '<col class="c-pts"><col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
+        '<col class="c-sg"><col class="c-forma">'
         '</colgroup>'
     )
     html = (
@@ -1068,7 +1076,7 @@ tr:hover td{{background:#1a2a5e}}
         f'<div class="titulo">🏆 {nome_liga} — Classificação {ano}</div>'
         f'<table>{colgroup}<thead><tr>'
         f'<th>#</th><th class="th-clube">Clube</th>'
-        f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th><th>ÚLT. 5</th>'
+        f'<th>PTS</th><th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>ÚLT. 5</th>'
         f'</tr></thead><tbody>{linhas}</tbody></table>'
         f'<div class="legenda">{legenda_html}</div>'
         f'</body></html>'
@@ -1100,8 +1108,8 @@ async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") 
     colgroup = (
         '<colgroup>'
         '<col class="c-pos"><col class="c-clube">'
-        '<col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
-        '<col class="c-sg"><col class="c-pts"><col class="c-forma">'
+        '<col class="c-pts"><col class="c-stat"><col class="c-stat"><col class="c-stat"><col class="c-stat">'
+        '<col class="c-sg"><col class="c-forma">'
         '</colgroup>'
     )
 
@@ -1121,12 +1129,12 @@ async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") 
                 f'<tr class="{zona}">'
                 f'<td class="pos">{rank}</td>'
                 f'<td class="time-col">{_img_tag(b64, nome, 18)}<span>{nome}</span></td>'
+                f'<td class="pts">{time["points"]}</td>'
                 f'<td>{time["all"]["played"]}</td>'
                 f'<td>{time["all"]["win"]}</td>'
                 f'<td>{time["all"]["draw"]}</td>'
                 f'<td>{time["all"]["lose"]}</td>'
                 f'<td>{sg_str}</td>'
-                f'<td class="pts">{time["points"]}</td>'
                 f'<td class="forma-col">{_forma_html(time.get("forma", []))}</td>'
                 f'</tr>'
             )
@@ -1135,7 +1143,7 @@ async def gerar_tabela_grupos_png(grupos: list, nome_liga: str, slug: str = "") 
             f'<div class="grupo-nome">{grupo["name"]}</div>'
             f'<table>{colgroup}<thead><tr>'
             f'<th>#</th><th class="th-clube">Clube</th>'
-            f'<th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>PTS</th><th>ÚLT. 5</th>'
+            f'<th>PTS</th><th>PJ</th><th>V</th><th>E</th><th>D</th><th>SG</th><th>ÚLT. 5</th>'
             f'</tr></thead><tbody>{linhas}</tbody></table>'
             f'</div>'
         )
@@ -1459,6 +1467,13 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
             tie["completed"]   = True
         if date_ev and (not tie["date"] or date_ev < tie["date"]):
             tie["date"] = date_ev
+
+    # Filtra apenas rodadas mata-mata (exclui matchdays/fase de liga)
+    rounds_map = {rn: ties for rn, ties in rounds_map.items()
+                  if round_sort_idx.get(rn, 99) < 99}
+    round_sort_idx = {rn: v for rn, v in round_sort_idx.items() if rn in rounds_map}
+    if not rounds_map:
+        return None
 
     # Monta resultado ordenado por rodada
     sorted_rnames = sorted(rounds_map.keys(),
