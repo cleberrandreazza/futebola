@@ -703,7 +703,9 @@ def _e_hoje(date_str: str) -> bool:
 
 def buscar_jogos_do_dia(slug: str, data_yyyymmdd: str = None) -> list:
     """Busca jogos de uma liga. data_yyyymmdd=None → hoje; caso contrário usa a data fornecida."""
-    params = {"dates": data_yyyymmdd} if data_yyyymmdd else None
+    hoje_str   = datetime.now(tz=BRT).strftime("%Y%m%d")
+    data_busca = data_yyyymmdd or hoje_str
+    params     = {"dates": data_busca}
     data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", params)
     if not data:
         return []
@@ -2140,6 +2142,21 @@ class TransmitirButton(discord.ui.Button):
                 pass
 
 
+def _botao_player_visivel(jogo: dict) -> bool:
+    """True se o jogo está ao vivo ou começa em ≤5 minutos."""
+    status = jogo["fixture"]["status"]["short"]
+    if status not in ("NS", "TBD"):
+        return True
+    try:
+        dt_jogo = datetime.fromisoformat(jogo["fixture"]["date"].replace("Z", "+00:00"))
+        agora   = datetime.now(timezone.utc)
+        if dt_jogo.tzinfo is None:
+            dt_jogo = dt_jogo.replace(tzinfo=timezone.utc)
+        return (dt_jogo - agora).total_seconds() <= 300
+    except Exception:
+        return False
+
+
 class SeguirView(discord.ui.View):
     def __init__(self, jogos: list, slug: str):
         super().__init__(timeout=600)
@@ -2147,7 +2164,7 @@ class SeguirView(discord.ui.View):
         for i, jogo in enumerate(jogos[:5]):
             self.add_item(SeguirButton(jogo, slug, row=i))
             self.add_item(DetalhesButton(jogo, row=i))
-            if IPTV_URL:
+            if IPTV_URL and _botao_player_visivel(jogo):
                 self.add_item(TransmitirButton(jogo, row=i))
 
 
