@@ -2144,11 +2144,6 @@ async def cmd_ajuda(ctx):
     await ctx.send(embed=embed)
 
 
-print("=== DEBUG ENV VARS ===")
-for k in sorted(os.environ.keys()):
-    print(f"  {k}")
-print("=== FIM DEBUG ===")
-
 if not TOKEN_DO_DISCORD:
     raise SystemExit("ERRO: TOKEN_DISCORD não encontrado. Verifique o nome exato da variável no Railway.")
 

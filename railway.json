@@ -3,6 +3,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "playwright install chromium && python bot.py"
+    "startCommand": "playwright install --with-deps chromium && python bot.py"
   }
 }
