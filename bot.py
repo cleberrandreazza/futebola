@@ -364,9 +364,19 @@ def _bzzoiro_get(endpoint: str, params: dict = None) -> dict | None:
 
 _logo_cache_brasil: dict[str, str] = {}
 
+# Bzzoiro usa nomes diferentes dos que a ESPN usa para alguns times brasileiros
+_BZ_ESPN_ALIASES: dict[str, str] = {
+    "Atlético Mineiro":      "Atlético-MG",
+    "Athletico":             "Athletico-PR",
+    "Athletic Club":         "Athletic",
+    "Grêmio Novorizontino":  "Novorizontino",
+    "Operário-PR":           "Operário PR",
+    "Paysandu SC":           "Paysandu",
+}
+
 
 def _buscar_logos_brasileiros() -> dict[str, str]:
-    """Constrói mapa nome_time → logo_url a partir dos scoreboards ESPN de BRA.1/Libertadores/Sul-Americana."""
+    """Constrói mapa nome_time → logo_url a partir dos scoreboards ESPN (BRA.1-3, Lib, Sula)."""
     global _logo_cache_brasil
     if _logo_cache_brasil:
         return _logo_cache_brasil
@@ -374,7 +384,9 @@ def _buscar_logos_brasileiros() -> dict[str, str]:
     hoje   = datetime.now(tz=BRT).date()
     inicio = (hoje - timedelta(days=120)).strftime("%Y%m%d")
     fim    = (hoje + timedelta(days=30)).strftime("%Y%m%d")
-    for slug in ("BRA.1", "CONMEBOL.LIBERTADORES", "CONMEBOL.SUDAMERICANA"):
+    slugs  = ("BRA.1", "BRA.2", "BRA.3",
+              "CONMEBOL.LIBERTADORES", "CONMEBOL.SUDAMERICANA")
+    for slug in slugs:
         data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
                          {"dates": f"{inicio}-{fim}", "limit": 500})
         for ev in (data or {}).get("events", []):
@@ -385,6 +397,10 @@ def _buscar_logos_brasileiros() -> dict[str, str]:
                 logo = t.get("logo", "")
                 if name and logo and name not in mapa:
                     mapa[name] = logo
+    # Aplica aliases: adiciona entradas com o nome Bzzoiro apontando para o logo ESPN
+    for bz_name, espn_name in _BZ_ESPN_ALIASES.items():
+        if bz_name not in mapa and espn_name in mapa:
+            mapa[bz_name] = mapa[espn_name]
     _logo_cache_brasil = mapa
     return mapa
 
@@ -555,6 +571,83 @@ def buscar_rodada_copa_brasil() -> tuple[str, list]:
     nome      = _BZ_ROUND_NAMES.get(best, f"Fase {best}" if best is not None else "Próxima Fase")
     confrontos = _bzzoiro_confrontos(rounds[best], logo_map)
     return (nome, confrontos)
+
+
+# Nomes oficiais das fases eliminatórias da Copa do Brasil pelo nº de confrontos
+_COPA_FASE_NOMES: dict[int, str] = {
+    8: "Oitavas de Final",
+    4: "Quartas de Final",
+    2: "Semifinais",
+    1: "Final",
+}
+
+
+def buscar_chaveamento_copa_brasil() -> list | None:
+    """Retorna rounds no formato gerar_chaveamento_png para as fases finais da Copa do Brasil."""
+    data = _bzzoiro_get("events/", {
+        "league_id": _BZ_COPA_LEAGUE, "season_id": _BZ_COPA_SEASON, "limit": 200,
+    })
+    if not data:
+        return None
+
+    events   = data.get("results", [])
+    logo_map = _buscar_logos_brasileiros()
+
+    # Agrupa por round_number; guarda só rodadas com ≤ 8 confrontos (fases finais)
+    rounds: dict[object, list] = {}
+    for ev in events:
+        rn = ev.get("round_number")
+        rounds.setdefault(rn, []).append(ev)
+
+    result = []
+    for rn in sorted(rounds, key=lambda x: (x is None, x or 0)):
+        confrontos = _bzzoiro_confrontos(rounds[rn], logo_map)
+        if len(confrontos) > 8:
+            continue  # pula fases iniciais (muitos times)
+
+        n = len(confrontos)
+        nome = _COPA_FASE_NOMES.get(n) or _BZ_ROUND_NAMES.get(rn) or (
+            f"Fase {rn}" if rn is not None else "Próxima Fase"
+        )
+
+        matchups = []
+        for c in confrontos:
+            short  = c["fixture"]["status"]["short"]
+            hg     = c["goals"]["home"]
+            ag     = c["goals"]["away"]
+            pen    = c.get("penalty", {})
+            ph, pa = pen.get("home"), pen.get("away")
+            done   = short in ("FT", "AET", "PEN")
+
+            if done and hg is not None:
+                if short == "PEN" and ph is not None:
+                    hw, aw = ph > pa, pa > ph
+                else:
+                    hw, aw = hg > ag, ag > hg
+            else:
+                hw = aw = False
+
+            matchups.append({
+                "home": {
+                    "team": {"name": c["teams"]["home"]["name"],
+                             "logo": c["teams"]["home"]["logo"], "abbr": ""},
+                    "score":     str(hg) if done and hg is not None else "",
+                    "aggregate": "",
+                    "winner":    hw,
+                },
+                "away": {
+                    "team": {"name": c["teams"]["away"]["name"],
+                             "logo": c["teams"]["away"]["logo"], "abbr": ""},
+                    "score":     str(ag) if done and ag is not None else "",
+                    "aggregate": "",
+                    "winner":    aw,
+                },
+            })
+
+        if matchups:
+            result.append({"name": nome, "matchups": matchups})
+
+    return result or None
 
 
 def _stat(stats: list, name: str) -> int:
@@ -3080,14 +3173,17 @@ async def cmd_chaveamento(ctx, *, nome_liga: str = "champions"):
 
     msg = await ctx.send(f"🏆 Buscando chaveamento — **{nome_liga.title()}**...")
 
-    # Copa do Brasil: reutiliza gerar_mata_mata_png
+    # Copa do Brasil: bracket estilo Champions (gerar_chaveamento_png)
     if chave in LIGAS_COPA:
         loop = asyncio.get_event_loop()
-        rodada, fixtures = await loop.run_in_executor(None, buscar_rodada_copa_brasil)
-        if not fixtures:
-            await msg.edit(content="❌ Sem dados da Copa do Brasil.")
+        rounds = await loop.run_in_executor(None, buscar_chaveamento_copa_brasil)
+        if not rounds:
+            await msg.edit(content="❌ Sem dados de chaveamento da Copa do Brasil.")
             return
-        img = await gerar_mata_mata_png(fixtures, "Copa do Brasil", rodada)
+        img = await gerar_chaveamento_png(rounds, "Copa do Brasil 🏆")
+        if not img:
+            await msg.edit(content="❌ Não foi possível gerar o chaveamento.")
+            return
         await msg.delete()
         await ctx.send(file=discord.File(img))
         return
