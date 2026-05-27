@@ -35,9 +35,11 @@ ESPN_V1 = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # Bzzoiro Sports Data API — Copa do Brasil 2026
 BZZOIRO_TOKEN     = os.getenv("BZZOIRO_TOKEN", "")
 BZZOIRO_BASE      = "https://sports.bzzoiro.com/api/v2"
-_BZ_COPA_LEAGUE        = 35
-_BZ_COPA_SEASON        = 78
-_BZ_BRASILEIRAO_LEAGUE = 9
+_BZ_COPA_LEAGUE          = 35
+_BZ_COPA_SEASON          = 78
+_BZ_BRASILEIRAO_LEAGUE   = 9
+_BZ_LIBERTADORES_LEAGUE  = 32
+_BZ_SULAMERICANA_LEAGUE  = 33
 _BZ_ROUND_NAMES   = {
     1: "1ª Fase", 2: "2ª Fase", 3: "3ª Fase", 4: "4ª Fase",
     5: "5ª Fase", 6: "Semifinais", 7: "Final",
@@ -45,11 +47,15 @@ _BZ_ROUND_NAMES   = {
 _BZ_LEAGUE_NAMES: dict[int, str] = {
     9:  "Brasileirão Série A",
     35: "Copa do Brasil",
+    32: "Copa Libertadores",
+    33: "Copa Sul-Americana",
 }
 # Mapeamento de chave de liga (LIGAS) → league_id Bzzoiro (para filtro)
 _BZ_LIGA_TO_ID: dict[str, int] = {
-    "brasileirao":  9,
-    "copadobrasil": 35,
+    "brasileirao":   9,
+    "copadobrasil":  35,
+    "libertadores":  32,
+    "sulamericana":  33,
 }
 
 # Competições de mata-mata: !tabela mostra rodada atual, não tabela de pontos
@@ -118,7 +124,13 @@ def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
 def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
     """Busca o event_id Bzzoiro para um jogo de hoje pelos nomes dos times."""
     hoje = datetime.now(tz=BRT).date()
-    for league_id, extra in [(_BZ_BRASILEIRAO_LEAGUE, {}), (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON})]:
+    leagues = [
+        (_BZ_BRASILEIRAO_LEAGUE, {}),
+        (_BZ_COPA_LEAGUE,        {"season_id": _BZ_COPA_SEASON}),
+        (_BZ_LIBERTADORES_LEAGUE, {}),
+        (_BZ_SULAMERICANA_LEAGUE, {}),
+    ]
+    for league_id, extra in leagues:
         params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
@@ -515,6 +527,12 @@ def _bz_build_team_map() -> dict[str, tuple[int, str]]:
     bra_season = _bz_current_season(_BZ_BRASILEIRAO_LEAGUE)
     if bra_season:
         known.append((_BZ_BRASILEIRAO_LEAGUE, bra_season))
+    lib_season = _bz_current_season(_BZ_LIBERTADORES_LEAGUE)
+    if lib_season:
+        known.append((_BZ_LIBERTADORES_LEAGUE, lib_season))
+    sul_season = _bz_current_season(_BZ_SULAMERICANA_LEAGUE)
+    if sul_season:
+        known.append((_BZ_SULAMERICANA_LEAGUE, sul_season))
     for league_id, season_id in known:
         params: dict = {"league_id": league_id, "limit": 200}
         if season_id:
@@ -1133,7 +1151,15 @@ def buscar_jogos_do_dia(slug: str, data_yyyymmdd: str = None) -> list:
             type_name   = status_type.get("name") or ""
 
             if state == "pre":
-                short = "NS"
+                # ESPN sometimes delays updating state; if kickoff was 2+ min ago, treat as live
+                try:
+                    match_dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) >= match_dt.astimezone(timezone.utc) + timedelta(minutes=2):
+                        short = "1H"
+                    else:
+                        short = "NS"
+                except Exception:
+                    short = "NS"
             elif state == "post":
                 short = "FT"
             elif type_name == "STATUS_HALFTIME":
@@ -1142,7 +1168,7 @@ def buscar_jogos_do_dia(slug: str, data_yyyymmdd: str = None) -> list:
                 short = "1H"
 
             elapsed = None
-            if state == "in" and short != "HT":
+            if short == "1H" and state != "post" and type_name != "STATUS_HALFTIME":
                 clock = status.get("displayClock") or ""
                 try:
                     elapsed = int(clock.split(":")[0])
@@ -2295,68 +2321,68 @@ _PLAYER_HTML = """\
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title}</title>
+<title>__TITLE__</title>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.js"></script>
 <style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif}
 /* ── vídeo ── */
-.vwrap{{background:#000;width:100%;line-height:0}}
-video{{width:100%;max-height:100vh;display:block;outline:none}}
-.vstatus{{font-size:12px;color:#8892a4;text-align:center;padding:6px;background:#0d1117}}
+.vwrap{background:#000;width:100%;line-height:0}
+video{width:100%;max-height:100vh;display:block;outline:none}
+.vstatus{font-size:12px;color:#8892a4;text-align:center;padding:6px;background:#0d1117}
 /* ── score header ── */
-.dheader{{padding:14px 16px 12px;background:#16213e;border-bottom:1px solid #21262d}}
-.comp{{font-size:11px;color:#8892a4;text-align:center;margin-bottom:10px}}
-.score-row{{display:flex;align-items:center;justify-content:center;gap:8px}}
-.team{{display:flex;flex-direction:column;align-items:center;gap:7px;flex:1;min-width:0}}
-.team img{{width:52px;height:52px;object-fit:contain}}
-.logo-ph{{width:52px;height:52px;background:#0f3460;border-radius:10px}}
-.tname{{font-size:14px;font-weight:700;text-align:center}}
-.smid{{text-align:center;flex-shrink:0;min-width:110px}}
-.score{{font-size:52px;font-weight:800;color:#fff;letter-spacing:4px}}
-.ht{{font-size:11px;color:#8892a4;margin-top:3px}}
-.badge{{display:inline-block;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;margin-top:8px}}
-.venue{{font-size:11px;color:#8892a4;margin-top:10px;text-align:center}}
+.dheader{padding:14px 16px 12px;background:#16213e;border-bottom:1px solid #21262d}
+.comp{font-size:11px;color:#8892a4;text-align:center;margin-bottom:10px}
+.score-row{display:flex;align-items:center;justify-content:center;gap:8px}
+.team{display:flex;flex-direction:column;align-items:center;gap:7px;flex:1;min-width:0}
+.team img{width:52px;height:52px;object-fit:contain}
+.logo-ph{width:52px;height:52px;background:#0f3460;border-radius:10px}
+.tname{font-size:14px;font-weight:700;text-align:center}
+.smid{text-align:center;flex-shrink:0;min-width:110px}
+.score{font-size:52px;font-weight:800;color:#fff;letter-spacing:4px}
+.ht{font-size:11px;color:#8892a4;margin-top:3px}
+.badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;margin-top:8px}
+.venue{font-size:11px;color:#8892a4;margin-top:10px;text-align:center}
 /* ── tabs ── */
-.tabs{{display:flex;border-bottom:1px solid #21262d;background:#0d1117}}
-.tab{{flex:1;padding:11px 4px;text-align:center;font-size:12px;font-weight:700;color:#8892a4;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}}
-.tab.active{{color:#93c5fd;border-bottom-color:#3b82f6;background:#161b22}}
-.tab:hover:not(.active){{color:#cbd5e1}}
+.tabs{display:flex;border-bottom:1px solid #21262d;background:#0d1117}
+.tab{flex:1;padding:11px 4px;text-align:center;font-size:12px;font-weight:700;color:#8892a4;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.tab.active{color:#93c5fd;border-bottom-color:#3b82f6;background:#161b22}
+.tab:hover:not(.active){color:#cbd5e1}
 /* ── sections ── */
-.sec-hdr{{background:#1a2a5e;color:#93c5fd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:8px 16px;display:flex;justify-content:space-between;align-items:center}}
-.updated{{font-size:9px;color:#4b5563;font-weight:400}}
+.sec-hdr{background:#1a2a5e;color:#93c5fd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:8px 16px;display:flex;justify-content:space-between;align-items:center}
+.updated{font-size:9px;color:#4b5563;font-weight:400}
 /* ── incidents ── */
-.inc-hdr,.inc-row{{display:flex;align-items:center;padding:0 12px}}
-.inc-h{{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:7px 6px;font-size:13px}}
-.inc-a{{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:7px 6px;font-size:13px}}
-.inc-m{{width:60px;text-align:center;color:#93c5fd;font-size:12px;font-weight:700;flex-shrink:0}}
-.inc-row{{border-bottom:1px solid #0d1117}}
-.inc-sub .inc-h,.inc-sub .inc-a{{font-size:11px;color:#8892a4}}
-.ic{{font-size:16px;flex-shrink:0}}
-.assist{{color:#8892a4;font-size:11px}}
-.sub-in{{color:#10b981}}.sub-out{{color:#ef4444}}
-.psep{{background:#0f1c33;color:#6b7a99;text-align:center;font-size:11px;padding:6px;letter-spacing:1px}}
+.inc-hdr,.inc-row{display:flex;align-items:center;padding:0 12px}
+.inc-h{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:7px 6px;font-size:13px}
+.inc-a{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:7px 6px;font-size:13px}
+.inc-m{width:60px;text-align:center;color:#93c5fd;font-size:12px;font-weight:700;flex-shrink:0}
+.inc-row{border-bottom:1px solid #0d1117}
+.inc-sub .inc-h,.inc-sub .inc-a{font-size:11px;color:#8892a4}
+.ic{font-size:16px;flex-shrink:0}
+.assist{color:#8892a4;font-size:11px}
+.sub-in{color:#10b981}.sub-out{color:#ef4444}
+.psep{background:#0f1c33;color:#6b7a99;text-align:center;font-size:11px;padding:6px;letter-spacing:1px}
 /* ── stats ── */
-.stats-body{{padding:8px 16px 14px;max-width:700px;margin:0 auto}}
-.stat-row{{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0f1c33}}
-.sv{{width:48px;font-size:13px;font-weight:700;flex-shrink:0}}
-.sh{{text-align:right;color:#60a5fa}}.sa{{text-align:left;color:#fbbf24}}
-.sbar{{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}}
-.sb-h{{background:#3b82f6;height:100%;float:right}}.sb-a{{background:#f59e0b;height:100%;float:left}}
-.slabel{{width:130px;text-align:center;font-size:11px;color:#8892a4;flex-shrink:0}}
+.stats-body{padding:8px 16px 14px;max-width:700px;margin:0 auto}
+.stat-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0f1c33}
+.sv{width:48px;font-size:13px;font-weight:700;flex-shrink:0}
+.sh{text-align:right;color:#60a5fa}.sa{text-align:left;color:#fbbf24}
+.sbar{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}
+.sb-h{background:#3b82f6;height:100%;float:right}.sb-a{background:#f59e0b;height:100%;float:left}
+.slabel{width:130px;text-align:center;font-size:11px;color:#8892a4;flex-shrink:0}
 /* ── lineups ── */
-.lu-wrap{{display:flex;max-width:700px;margin:0 auto}}
-.lu-col{{flex:1;padding:10px 14px;min-width:0}}
-.lu-col-r{{text-align:right}}
-.lu-div{{width:1px;background:#21262d;flex-shrink:0}}
-.lu-head{{font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #21262d}}
-.pl{{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid #0d1117;font-size:12px}}
-.pl-r{{justify-content:flex-end}}
-.pj{{width:22px;height:22px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#93c5fd;flex-shrink:0;text-align:center}}
-.pp{{font-size:9px;color:#8892a4;width:14px;flex-shrink:0;text-align:center}}
-.pn{{font-size:12px;font-weight:500}}
-.no-data{{padding:24px;text-align:center;color:#4b5563;font-size:13px}}
+.lu-wrap{display:flex;max-width:700px;margin:0 auto}
+.lu-col{flex:1;padding:10px 14px;min-width:0}
+.lu-col-r{text-align:right}
+.lu-div{width:1px;background:#21262d;flex-shrink:0}
+.lu-head{font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #21262d}
+.pl{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid #0d1117;font-size:12px}
+.pl-r{justify-content:flex-end}
+.pj{width:22px;height:22px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#93c5fd;flex-shrink:0;text-align:center}
+.pp{font-size:9px;color:#8892a4;width:14px;flex-shrink:0;text-align:center}
+.pn{font-size:12px;font-weight:500}
+.no-data{padding:24px;text-align:center;color:#4b5563;font-size:13px}
 </style>
 </head>
 <body>
@@ -2375,74 +2401,74 @@ video{{width:100%;max-height:100vh;display:block;outline:none}}
 <div id="tab-lu"    style="display:none"></div>
 <script>
 const TOKEN    = location.pathname.split("/").pop();
-const PROXY    = "{server_url}/proxy/" + TOKEN;
-const API      = "{server_url}/api/live/" + TOKEN;
-const isHLS    = "{stream_url}".includes(".m3u8");
+const PROXY    = "__SERVER_URL__/proxy/" + TOKEN;
+const API      = "__SERVER_URL__/api/live/" + TOKEN;
+const isHLS    = "__STREAM_URL__".includes(".m3u8");
 const v        = document.getElementById("v");
 const vstatus  = document.getElementById("vstatus");
 let   curTab   = "inc";
 
 // ── Video ──────────────────────────────────────────────────────────────────
-function setVStatus(m) {{ vstatus.textContent = m; }}
-if (isHLS && Hls.isSupported()) {{
-    const hls = new Hls({{enableWorker:true,lowLatencyMode:true}});
+function setVStatus(m) { vstatus.textContent = m; }
+if (isHLS && Hls.isSupported()) {
+    const hls = new Hls({enableWorker:true,lowLatencyMode:true});
     hls.loadSource(PROXY); hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {{ v.play(); setVStatus("🔴 Ao vivo"); }});
-    hls.on(Hls.Events.ERROR, (_,d) => {{ if(d.fatal) setVStatus("❌ "+d.details); }});
-}} else if (mpegts.isSupported()) {{
-    const p = mpegts.createPlayer({{type:"mpegts",isLive:true,url:PROXY}},
-        {{enableWorker:true,lazyLoadMaxDuration:180,seekType:"range"}});
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { v.play(); setVStatus("🔴 Ao vivo"); });
+    hls.on(Hls.Events.ERROR, (_,d) => { if(d.fatal) setVStatus("❌ "+d.details); });
+} else if (mpegts.isSupported()) {
+    const p = mpegts.createPlayer({type:"mpegts",isLive:true,url:PROXY},
+        {enableWorker:true,lazyLoadMaxDuration:180,seekType:"range"});
     p.attachMediaElement(v); p.load(); p.play();
     p.on(mpegts.Events.MEDIA_INFO, () => setVStatus("🔴 Ao vivo"));
     p.on(mpegts.Events.ERROR, (t) => setVStatus("❌ "+t));
-}} else {{
+} else {
     setVStatus("❌ Navegador sem suporte. Use Chrome.");
-}}
+}
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
-function showTab(id) {{
+function showTab(id) {
     curTab = id;
-    ["inc","stats","lu"].forEach(t => {{
+    ["inc","stats","lu"].forEach(t => {
         document.getElementById("tab-"+t).style.display = (t===id ? "" : "none");
-    }});
-    document.querySelectorAll(".tab").forEach(el => {{
+    });
+    document.querySelectorAll(".tab").forEach(el => {
         el.classList.toggle("active", el.dataset.tab === id);
-    }});
-}}
+    });
+}
 
 // ── Utils ───────────────────────────────────────────────────────────────────
-function esc(s) {{
+function esc(s) {
     return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}}
-function logo(url, sz) {{
+}
+function logo(url, sz) {
     sz = sz||42;
     if (url) return '<img src="'+url+'" width="'+sz+'" height="'+sz+'" style="object-fit:contain" onerror="this.replaceWith(document.createElement(\'div\'))">';
     return '<div class="logo-ph" style="width:'+sz+'px;height:'+sz+'px"></div>';
-}}
-function now() {{
-    return new Date().toLocaleTimeString("pt-BR",{{hour:"2-digit",minute:"2-digit"}});
-}}
-function sv(side, keys) {{
-    for (var i=0;i<keys.length;i++) {{
-        var v = (side||{{}})[keys[i]];
+}
+function now() {
+    return new Date().toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+}
+function sv(side, keys) {
+    for (var i=0;i<keys.length;i++) {
+        var v = (side||{})[keys[i]];
         if (typeof v==="object"&&v!==null) v=v.actual??v.value??v.pct??0;
-        if (v!==null&&v!==undefined) {{ var n=parseFloat(v); if(!isNaN(n)) return n; }}
-    }}
+        if (v!==null&&v!==undefined) { var n=parseFloat(v); if(!isNaN(n)) return n; }
+    }
     return 0;
-}}
+}
 
 // ── Header ──────────────────────────────────────────────────────────────────
-function renderHeader(ev, venue, logos) {{
+function renderHeader(ev, venue, logos) {
     if (!ev) return;
     var st=ev.status||"", mn=ev.current_minute;
     var bText="A INICIAR", bColor="#8892a4";
-    if (st==="finished") {{ bText=(ev.period||"FT").toUpperCase(); bColor="#10b981"; }}
-    else if (st!=="notstarted") {{ bText=mn?mn+"'":"AO VIVO"; bColor="#ef4444"; }}
+    if (st==="finished") { bText=(ev.period||"FT").toUpperCase(); bColor="#10b981"; }
+    else if (st!=="notstarted") { bText=mn?mn+"'":"AO VIVO"; bColor="#ef4444"; }
     var hasScore=st!=="notstarted";
     var scoreStr=hasScore?(ev.home_score??"-")+" · "+(ev.away_score??"-"):"vs";
     var htHtml=(hasScore&&ev.home_score_ht!=null)
         ? '<div class="ht">Intervalo '+ev.home_score_ht+"-"+ev.away_score_ht+"</div>" : "";
-    var lg=logos||{{}};
+    var lg=logos||{};
     document.getElementById("dheader").innerHTML =
         '<div class="comp">'+esc(ev.competition_name||"")+'</div>'+
         '<div class="score-row">'+
@@ -2455,54 +2481,54 @@ function renderHeader(ev, venue, logos) {{
         '</div>'+
         (venue&&venue.name?'<div class="venue">📍 '+esc(venue.name)+(venue.city?" "+esc(venue.city):"")+'</div>':"");
     document.getElementById("tabs").style.display="";
-}}
+}
 
 // ── Incidents ───────────────────────────────────────────────────────────────
-function renderIncidents(incs, ev) {{
+function renderIncidents(incs, ev) {
     var hName=esc(ev&&ev.home_team||"Casa"), aName=esc(ev&&ev.away_team||"Fora");
-    if (!incs||!incs.length) {{
+    if (!incs||!incs.length) {
         document.getElementById("tab-inc").innerHTML='<div class="no-data">Sem incidentes registrados.</div>';
         return;
-    }}
-    var sorted=incs.slice().sort(function(a,b){{return (a.minute||0)-(b.minute||0)||(a.added_time||0)-(b.added_time||0);}});
+    }
+    var sorted=incs.slice().sort(function(a,b){return (a.minute||0)-(b.minute||0)||(a.added_time||0)-(b.added_time||0);});
     var rows='<div class="inc-hdr"><div class="inc-h" style="font-size:10px;color:#8892a4">'+hName+'</div><div class="inc-m"></div><div class="inc-a" style="font-size:10px;color:#8892a4">'+aName+'</div></div>';
-    function minStr(i) {{ return i.added_time?i.minute+"+"+i.added_time+"'":i.minute+"'"; }}
-    for (var i=0;i<sorted.length;i++) {{
+    function minStr(i) { return i.added_time?i.minute+"+"+i.added_time+"'":i.minute+"'"; }
+    for (var i=0;i<sorted.length;i++) {
         var inc=sorted[i], t=inc.type||"", mn=minStr(inc), home=inc.is_home!==false;
-        if (t==="period") {{
+        if (t==="period") {
             if (/(HT|HALF)/i.test(inc.text||""))
                 rows+='<div class="psep">── INTERVALO '+(inc.home_score||"")+"-"+(inc.away_score||"")+" ──</div>";
             continue;
-        }}
-        if (t==="injuryTime") {{
+        }
+        if (t==="injuryTime") {
             rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">+'+(inc.length||"?")+"'</div>"+'<div class="inc-a" style="font-size:9px;color:#6b7a99">acréscimos</div></div>';
             continue;
-        }}
-        if (t==="goal") {{
+        }
+        if (t==="goal") {
             var own=inc.goal_type==="own";
             var txt='<b>'+esc(inc.player||"")+'</b>'+(inc.assist?' <span class="assist">('+esc(inc.assist)+')</span>':"")+(own?' <span style="color:#ef4444;font-size:9px">CG</span>':"");
             if (home) rows+='<div class="inc-row"><div class="inc-h"><span class="ic">⚽</span>'+txt+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
             else      rows+='<div class="inc-row"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+txt+'<span class="ic">⚽</span></div></div>';
-        }} else if (t==="card") {{
+        } else if (t==="card") {
             var icon=inc.card_type==="yellow"?"🟡":"🟥";
             if (home) rows+='<div class="inc-row inc-sub"><div class="inc-h"><span class="ic">'+icon+'</span>'+esc(inc.player||"")+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
             else      rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+esc(inc.player||"")+'<span class="ic">'+icon+'</span></div></div>';
-        }} else if (t==="substitution") {{
+        } else if (t==="substitution") {
             var stxt='<span class="sub-in">↑ '+esc(inc.player_in||"")+'</span> <span class="sub-out">↓ '+esc(inc.player_out||"")+'</span>';
             if (home) rows+='<div class="inc-row inc-sub"><div class="inc-h">'+stxt+'</div><div class="inc-m">'+mn+'</div><div class="inc-a"></div></div>';
             else      rows+='<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">'+mn+'</div><div class="inc-a">'+stxt+'</div></div>';
-        }}
-    }}
+        }
+    }
     document.getElementById("tab-inc").innerHTML=
         '<div class="sec-hdr">Lance a Lance<span class="updated">att. '+now()+'</span></div>'+rows;
-}}
+}
 
 // ── Stats ───────────────────────────────────────────────────────────────────
-function statRow(label, hv, av, pct, dec) {{
+function statRow(label, hv, av, pct, dec) {
     var total=hv+av;
     var hBar=pct?Math.round(hv):(total>0?Math.round(hv/total*100):50);
     var aBar=100-hBar;
-    function fmt(n) {{ return dec?n.toFixed(dec):Math.round(n); }}
+    function fmt(n) { return dec?n.toFixed(dec):Math.round(n); }
     var suf=pct?"%":"";
     return '<div class="stat-row">'+
         '<div class="sv sh">'+fmt(hv)+suf+'</div>'+
@@ -2511,13 +2537,13 @@ function statRow(label, hv, av, pct, dec) {{
         '<div class="sbar"><div class="sb-a" style="width:'+aBar+'%"></div></div>'+
         '<div class="sv sa">'+fmt(av)+suf+'</div>'+
     '</div>';
-}}
-function renderStats(stats) {{
-    var sh=stats.home||{{}}, sa=stats.away||{{}};
-    if (!Object.keys(sh).length&&!Object.keys(sa).length) {{
+}
+function renderStats(stats) {
+    var sh=stats.home||{}, sa=stats.away||{};
+    if (!Object.keys(sh).length&&!Object.keys(sa).length) {
         document.getElementById("tab-stats").innerHTML='<div class="no-data">Estatísticas não disponíveis.</div>';
         return;
-    }}
+    }
     var rows="";
     rows+=statRow("Posse",          sv(sh,["ball_possession"]),              sv(sa,["ball_possession"]),              true,  0);
     rows+=statRow("xG",             sv(sh,["xg","expected_goals"]),          sv(sa,["xg","expected_goals"]),          false, 2);
@@ -2532,20 +2558,20 @@ function renderStats(stats) {{
     document.getElementById("tab-stats").innerHTML=
         '<div class="sec-hdr">Estatísticas<span class="updated">att. '+now()+'</span></div>'+
         '<div class="stats-body">'+rows+'</div>';
-}}
+}
 
 // ── Lineups ──────────────────────────────────────────────────────────────────
-function renderLineups(lineups, ev) {{
-    var lh=lineups.home||{{}}, la=lineups.away||{{}};
+function renderLineups(lineups, ev) {
+    var lh=lineups.home||{}, la=lineups.away||{};
     var hxi=lh.players||[], axi=la.players||[];
-    if (!hxi.length&&!axi.length) {{
+    if (!hxi.length&&!axi.length) {
         document.getElementById("tab-lu").innerHTML='<div class="no-data">Escalação não disponível.</div>';
         return;
-    }}
+    }
     var hHead=esc((ev&&ev.home_team)||"Casa")+(lh.formation?" ("+lh.formation+")":"");
     var aHead=esc((ev&&ev.away_team)||"Fora")+(la.formation?" ("+la.formation+")":"");
-    function plH(p) {{ return '<div class="pl"><div class="pj">'+esc(p.jersey_number||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pn">'+esc(p.name||"")+'</div></div>'; }}
-    function plA(p) {{ return '<div class="pl pl-r"><div class="pn">'+esc(p.name||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pj">'+esc(p.jersey_number||"")+'</div></div>'; }}
+    function plH(p) { return '<div class="pl"><div class="pj">'+esc(p.jersey_number||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pn">'+esc(p.name||"")+'</div></div>'; }
+    function plA(p) { return '<div class="pl pl-r"><div class="pn">'+esc(p.name||"")+'</div><div class="pp">'+esc(p.position||"")+'</div><div class="pj">'+esc(p.jersey_number||"")+'</div></div>'; }
     document.getElementById("tab-lu").innerHTML=
         '<div class="sec-hdr">Escalações</div>'+
         '<div class="lu-wrap">'+
@@ -2553,20 +2579,20 @@ function renderLineups(lineups, ev) {{
           '<div class="lu-div"></div>'+
           '<div class="lu-col lu-col-r"><div class="lu-head">'+aHead+'</div>'+axi.map(plA).join("")+'</div>'+
         '</div>';
-}}
+}
 
 // ── Fetch & refresh ──────────────────────────────────────────────────────────
-async function fetchLive() {{
-    try {{
+async function fetchLive() {
+    try {
         var r = await fetch(API+"?t="+Date.now());
         if (!r.ok) return;
         var d = await r.json();
         renderHeader(d.evento, d.venue, d.logos);
-        renderIncidents((d.incidents||{{}}).incidents||[], d.evento);
-        renderStats((d.stats||{{}}).stats||{{}});
-        renderLineups((d.lineups||{{}}).lineups||{{}}, d.evento);
-    }} catch(e) {{ console.error("[Live]", e); }}
-}}
+        renderIncidents((d.incidents||{}).incidents||[], d.evento);
+        renderStats((d.stats||{}).stats||{});
+        renderLineups((d.lineups||{}).lineups||{}, d.evento);
+    } catch(e) { console.error("[Live]", e); }
+}
 fetchLive();
 setInterval(fetchLive, 30000);
 </script>
@@ -2589,10 +2615,11 @@ async def _web_player_handler(request: aiohttp_web.Request) -> aiohttp_web.Respo
             text="<h2>⛔ Link expirado ou inválido.</h2>",
             content_type="text/html", status=410,
         )
-    html = _PLAYER_HTML.format(
-        title=sessao["title"],
-        stream_url=sessao["stream_url"],
-        server_url=SERVER_URL,
+    html = (
+        _PLAYER_HTML
+        .replace("__TITLE__",      sessao["title"])
+        .replace("__STREAM_URL__", sessao["stream_url"])
+        .replace("__SERVER_URL__", SERVER_URL)
     )
     return aiohttp_web.Response(text=html, content_type="text/html", charset="utf-8")
 
@@ -4092,10 +4119,16 @@ def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
 
 
 def buscar_eventos_hoje_bzzoiro() -> list[dict]:
-    """Retorna todos os eventos Bzzoiro de hoje (Brasileirão + Copa do Brasil)."""
+    """Retorna todos os eventos Bzzoiro de hoje (Brasileirão, Copa do Brasil, Libertadores, Sul-Americana)."""
     hoje   = datetime.now(tz=BRT).date()
     events: list[dict] = []
-    for league_id, extra in [(_BZ_BRASILEIRAO_LEAGUE, {}), (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON})]:
+    leagues = [
+        (_BZ_BRASILEIRAO_LEAGUE,  {}),
+        (_BZ_COPA_LEAGUE,         {"season_id": _BZ_COPA_SEASON}),
+        (_BZ_LIBERTADORES_LEAGUE, {}),
+        (_BZ_SULAMERICANA_LEAGUE, {}),
+    ]
+    for league_id, extra in leagues:
         params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
