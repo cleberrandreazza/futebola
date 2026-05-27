@@ -2452,6 +2452,11 @@ bot = FootballBot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f"Bot online: {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Slash commands sincronizados: {len(synced)}")
+    except Exception as e:
+        print(f"Erro ao sincronizar slash commands: {e}")
 
 
 # ==========================================
@@ -3380,6 +3385,219 @@ async def cmd_ajuda(ctx):
     )
     embed.set_footer(text="Dados: ESPN API 2026 · Copa do Brasil via API-Football (temporada 2024)")
     await ctx.send(embed=embed)
+
+
+# ==========================================
+# SLASH COMMANDS — autocomplete nativo do Discord
+# ==========================================
+
+_TIMES_BR_AUTOCOMPLETE = [
+    "Flamengo", "Fluminense", "Vasco da Gama", "Botafogo",
+    "São Paulo", "Corinthians", "Palmeiras", "Santos",
+    "Grêmio", "Internacional", "Atlético Mineiro", "Cruzeiro",
+    "Athletico", "Bahia", "Ceará", "Fortaleza", "Sport",
+    "Chapecoense", "Cuiabá", "Goiás", "Red Bull Bragantino",
+    "América Mineiro", "Coritiba", "Avaí", "Juventude",
+    "Mirassol", "Vitória", "Ferroviária", "Novorizontino",
+]
+
+
+async def _liga_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[discord.app_commands.Choice[str]]:
+    busca = current.lower()
+    return [
+        discord.app_commands.Choice(
+            name=f"{LIGAS_META.get(k, {}).get('emoji', '🏆')} {LIGAS_META.get(k, {}).get('nome', k.title())}",
+            value=k,
+        )
+        for k in LIGAS
+        if not busca or busca in k or busca in LIGAS_META.get(k, {}).get("nome", "").lower()
+    ][:25]
+
+
+async def _liga_sem_copa_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[discord.app_commands.Choice[str]]:
+    busca = current.lower()
+    return [
+        discord.app_commands.Choice(
+            name=f"{LIGAS_META.get(k, {}).get('emoji', '🏆')} {LIGAS_META.get(k, {}).get('nome', k.title())}",
+            value=k,
+        )
+        for k in LIGAS
+        if k not in LIGAS_COPA
+        and (not busca or busca in k or busca in LIGAS_META.get(k, {}).get("nome", "").lower())
+    ][:25]
+
+
+async def _time_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[discord.app_commands.Choice[str]]:
+    busca = current.lower()
+    if _bz_team_map_cache:
+        nomes = sorted({display for _, display in _bz_team_map_cache.values()})
+    else:
+        nomes = _TIMES_BR_AUTOCOMPLETE
+    return [
+        discord.app_commands.Choice(name=t, value=t)
+        for t in nomes
+        if not busca or busca in t.lower()
+    ][:25]
+
+
+@bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
+async def slash_hoje(interaction: discord.Interaction):
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    jogos_por_liga: dict = {}
+    for chave in LIGAS_RESUMO:
+        try:
+            if chave in LIGAS_COPA:
+                jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
+            else:
+                jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
+            if jogos:
+                jogos_por_liga[chave] = jogos
+        except Exception as e:
+            print(f"[/hoje] Erro em {chave}: {e}")
+    if not jogos_por_liga:
+        await interaction.followup.send("📭 Nenhum jogo encontrado hoje em nenhuma liga.")
+        return
+    total = sum(len(v) for v in jogos_por_liga.values())
+    try:
+        img = await gerar_resumo_diario_png(jogos_por_liga)
+        await interaction.followup.send(
+            content=f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas",
+            file=discord.File(img),
+        )
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+
+
+@bot.tree.command(name="tabela", description="Classificação de uma liga")
+@discord.app_commands.describe(liga="Escolha a liga")
+@discord.app_commands.autocomplete(liga=_liga_autocomplete)
+async def slash_tabela(interaction: discord.Interaction, liga: str = "brasileirao"):
+    chave = liga.lower().replace(" ", "")
+    if chave not in LIGAS:
+        await interaction.response.send_message("Liga inválida.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    meta      = LIGAS_META.get(chave, {"nome": chave.title(), "emoji": "🏆"})
+    nome_liga = f"{meta['emoji']} {meta['nome']}"
+    if chave in LIGAS_COPA:
+        nome_rodada, jogos = await loop.run_in_executor(None, buscar_rodada_copa_brasil)
+        if not jogos:
+            await interaction.followup.send("Dados da Copa do Brasil indisponíveis.")
+            return
+        caminho = await gerar_mata_mata_png(jogos, f"{nome_liga} — {nome_rodada}")
+        await interaction.followup.send(file=discord.File(caminho))
+        return
+    entradas = await loop.run_in_executor(None, buscar_tabela, LIGAS[chave])
+    if not entradas:
+        await interaction.followup.send(f"Tabela indisponível para {nome_liga}.")
+        return
+    try:
+        caminho = await gerar_tabela_png(entradas, nome_liga, LIGAS[chave])
+        await interaction.followup.send(file=discord.File(caminho))
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+
+
+@bot.tree.command(name="artilheiro", description="Top artilheiros de uma liga")
+@discord.app_commands.describe(liga="Escolha a liga")
+@discord.app_commands.autocomplete(liga=_liga_sem_copa_autocomplete)
+async def slash_artilheiro(interaction: discord.Interaction, liga: str = "brasileirao"):
+    chave = liga.lower()
+    if chave not in LIGAS or chave in LIGAS_COPA:
+        await interaction.response.send_message("Liga inválida para artilheiros.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    artilheiros = await loop.run_in_executor(None, buscar_artilheiros, LIGAS[chave])
+    if not artilheiros:
+        await interaction.followup.send("Nenhum artilheiro encontrado.")
+        return
+    meta = LIGAS_META.get(chave, {"nome": chave.title(), "emoji": "🏆"})
+    try:
+        caminho = await gerar_artilheiro_png(artilheiros, f"{meta['emoji']} {meta['nome']}")
+        await interaction.followup.send(file=discord.File(caminho))
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+
+
+@bot.tree.command(name="chaveamento", description="Bracket mata-mata de uma competição")
+@discord.app_commands.describe(liga="Escolha a competição")
+@discord.app_commands.autocomplete(liga=_liga_autocomplete)
+async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champions"):
+    chave = liga.lower().replace(" ", "")
+    if chave not in LIGAS:
+        await interaction.response.send_message("Liga inválida.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    meta      = LIGAS_META.get(chave, {"nome": chave.title(), "emoji": "🏆"})
+    nome_liga = f"{meta['emoji']} {meta['nome']}"
+    if chave in LIGAS_COPA:
+        rounds = await loop.run_in_executor(None, buscar_chaveamento_copa_brasil)
+        if not rounds:
+            await interaction.followup.send("❌ Sem dados de chaveamento da Copa do Brasil.")
+            return
+        img = await gerar_chaveamento_png(rounds, "Copa do Brasil 🏆")
+        await interaction.followup.send(file=discord.File(img))
+        return
+    rounds = await loop.run_in_executor(None, buscar_chaveamento, LIGAS[chave])
+    if not rounds:
+        await interaction.followup.send(f"Chaveamento não disponível para {nome_liga}.")
+        return
+    try:
+        img = await gerar_chaveamento_png(rounds, nome_liga)
+        await interaction.followup.send(file=discord.File(img))
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+
+
+@bot.tree.command(name="proximos", description="Próximos jogos de um time")
+@discord.app_commands.describe(time="Nome do time", liga="Liga (opcional — filtra por competição)")
+@discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
+async def slash_proximos(interaction: discord.Interaction, time: str, liga: str = ""):
+    await interaction.response.defer()
+    loop     = asyncio.get_event_loop()
+    liga_key = liga.lower() if liga.lower() in LIGAS else None
+    if liga_key:
+        meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
+        nome_liga = f"{meta['emoji']} {meta['nome']}"
+    else:
+        nome_liga = ""
+    bz_league_filter = _BZ_LIGA_TO_ID.get(liga_key) if liga_key else None
+    bz_result = await loop.run_in_executor(None, buscar_proximos_bzzoiro, time, bz_league_filter)
+    if bz_result:
+        jogos, nome_oficial = bz_result
+        try:
+            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+            await interaction.followup.send(file=discord.File(caminho))
+        except Exception as e:
+            await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+        return
+    if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
+        await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{time}**.")
+        return
+    resultado = await loop.run_in_executor(None, buscar_time_id, LIGAS[liga_key], time)
+    if not resultado:
+        await interaction.followup.send(f"Time `{time}` não encontrado.")
+        return
+    team_id, nome_oficial = resultado
+    jogos = await loop.run_in_executor(None, buscar_proximos_jogos, LIGAS[liga_key], team_id)
+    if not jogos:
+        await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
+        return
+    try:
+        caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+        await interaction.followup.send(file=discord.File(caminho))
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
 if not TOKEN_DO_DISCORD:
