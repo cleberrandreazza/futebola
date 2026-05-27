@@ -234,7 +234,7 @@ def _qualidade(nome: str) -> int:
 def _iptv_buscar_canal(nome: str) -> dict | None:
     """Localiza canal IPTV pelo nome com preferência por qualidade FHD > HD > SD."""
     canais = _iptv_canais()
-    busca  = nome.lower().strip()
+    busca  = _normalizar_canal(nome).lower()
 
     candidatos = []
 
@@ -439,16 +439,22 @@ def buscar_tabela(slug: str) -> list | None:
         return None
 
 
+def _normalizar_canal(nome: str) -> str:
+    """Normaliza nomes de canais: ESPN2→ESPN 2, ESPN3→ESPN 3, etc."""
+    return re.sub(r'(?i)^(ESPN|SPORTV|SPORTTV)(\d)$', r'\1 \2', nome.strip())
+
+
 def _extrair_meta(comp: dict) -> dict:
     """Extrai transmissão, estádio e odds de um objeto competition da ESPN."""
     broadcasts = []
     for b in (comp.get("geoBroadcasts") or []):
         media = b.get("media") or {}
         nome  = media.get("shortName", "") or media.get("callLetters", "")
+        nome  = _normalizar_canal(nome)
         if nome and nome not in broadcasts:
             broadcasts.append(nome)
     if not broadcasts and comp.get("broadcast"):
-        broadcasts = [comp["broadcast"]]
+        broadcasts = [_normalizar_canal(comp["broadcast"])]
 
     v       = comp.get("venue") or {}
     addr    = v.get("address") or {}
@@ -1760,12 +1766,14 @@ class TransmitirButton(discord.ui.Button):
 
         try:
             broadcasts = _canais_tv(self.jogo, slug)
+            print(f"[Player] {nome_casa} × {nome_fora} → canais: {broadcasts}")
             loop       = asyncio.get_event_loop()
 
             canal_iptv = None
             for nome in broadcasts:
                 canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
                 if canal_iptv:
+                    print(f"[Player] canal encontrado: {canal_iptv['name']}")
                     break
 
             if canal_iptv:
