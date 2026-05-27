@@ -1336,6 +1336,19 @@ _ROUND_ORDER_KEYS: list[tuple[str, int]] = [
     ("final", 6),
 ]
 
+# Mapa de season.slug da ESPN → nome legível para o chaveamento
+_SEASON_SLUG_DISPLAY: dict[str, str] = {
+    "knockout-round-playoffs":  "Playoffs",
+    "knockout-round-play-offs": "Playoffs",
+    "round-of-32":              "16 Avos de Final",
+    "round-of-16":              "Oitavas de Final",
+    "quarterfinals":            "Quartas de Final",
+    "quarter-finals":           "Quartas de Final",
+    "semifinals":               "Semifinals",
+    "semi-finals":              "Semifinals",
+    "final":                    "Final",
+}
+
 
 def _round_sort_key(name: str) -> int:
     n = name.lower()
@@ -1428,10 +1441,15 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
     for ev in eventos:
         comp        = (ev.get("competitions") or [{}])[0]
         notes       = comp.get("notes") or []
-        raw_name    = ((notes[0].get("headline", "") if notes else "")
-                       or (ev.get("week") or {}).get("displayValue", "")
-                       or "Rodada")
-        round_name  = _normalize_round_name(raw_name)
+        # Preferir season.slug (ESPN guarda o nome da fase aí, ex: 'round-of-16')
+        season_slug = (ev.get("season") or {}).get("slug", "")
+        if season_slug and season_slug in _SEASON_SLUG_DISPLAY:
+            round_name = _SEASON_SLUG_DISPLAY[season_slug]
+        else:
+            raw_name   = ((notes[0].get("headline", "") if notes else "")
+                          or (ev.get("week") or {}).get("displayValue", "")
+                          or "Rodada")
+            round_name = _normalize_round_name(raw_name)
         competitors = comp.get("competitors") or []
         home  = next((c for c in competitors if c.get("homeAway") == "home"), {})
         away  = next((c for c in competitors if c.get("homeAway") == "away"), {})
