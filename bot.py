@@ -1317,8 +1317,37 @@ tr.top td.gols{color:#fbbf24;font-size:18px}
     return await _html_para_png(html, "artilheiro_temp.png", width=600)
 
 
+# Mapeamento de palavras-chave para ordenação de rodadas
+_ROUND_ORDER_KEYS: list[tuple[str, int]] = [
+    ("playoff", 0), ("play-off", 0),
+    ("round of 64", 1),
+    ("round of 32", 2), ("32 avos", 2),
+    ("round of 16", 3), ("16 avos", 3), ("oitavas", 3),
+    ("quarterfinal", 4), ("quartas", 4), ("quarter", 4),
+    ("semifinal", 5), ("semi-final", 5), ("semis", 5),
+    ("final", 6),
+]
+
+
+def _round_sort_key(name: str) -> int:
+    n = name.lower()
+    for kw, order in _ROUND_ORDER_KEYS:
+        if kw in n:
+            return order
+    return 99
+
+
+def _normalize_round_name(name: str) -> str:
+    """Remove info de ida/volta: '1st Leg', 'Ida', 'Volta', '- 2'..."""
+    name = re.sub(
+        r'\s*[-–]\s*(\d+(st|nd|rd|th)?\s*(leg|jogo)|ida|volta)\s*$',
+        '', name, flags=re.IGNORECASE,
+    ).strip()
+    return name
+
+
 def _parsear_bracket_rounds(rounds_raw: list) -> list | None:
-    """Converte rounds da ESPN bracket API para [{name, matchups:[{home,away}]}]."""
+    """Converte rounds da ESPN bracket API para [{name, order, matchups}]."""
     resultado = []
     for r in rounds_raw:
         matchups = []
@@ -1329,73 +1358,162 @@ def _parsear_bracket_rounds(rounds_raw: list) -> list | None:
             def _parse_comp(c):
                 team = c.get("team") or {}
                 agg  = (c.get("aggregate") or {})
-                agg_score = (agg.get("score") or {}).get("displayValue", "")
+                agg_v = (agg.get("score") or {}).get("displayValue", "")
                 s = c.get("score") or {}
                 score = s.get("displayValue", "") if isinstance(s, dict) else str(s)
                 return {
-                    "team": {
-                        "name": team.get("displayName", "TBD"),
-                        "logo": team.get("logo", ""),
-                        "abbr": team.get("abbreviation", ""),
-                    },
+                    "team": {"name": team.get("displayName", "TBD"),
+                             "logo": team.get("logo", ""),
+                             "abbr": team.get("abbreviation", "")},
                     "score":     score,
-                    "aggregate": agg_score,
+                    "aggregate": agg_v,
                     "winner":    c.get("winner", False) or agg.get("winner", False),
                 }
             matchups.append({"home": _parse_comp(comps[0]), "away": _parse_comp(comps[1])})
         if matchups:
-            resultado.append({"name": r.get("name", "Rodada"), "matchups": matchups})
-    return resultado or None
-
-
-def _bracket_via_scoreboard(slug: str) -> list | None:
-    """Fallback: monta bracket a partir do scoreboard agrupado por rodada."""
-    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard")
-    if not data:
+            resultado.append({"name": r.get("name", "Rodada"),
+                               "order": _round_sort_key(r.get("name", "")),
+                               "matchups": matchups})
+    if not resultado:
         return None
-    rounds_map: dict[str, list] = {}
-    round_order: list[str] = []
-    for ev in data.get("events", []):
-        comp = (ev.get("competitions") or [{}])[0]
-        notes = comp.get("notes") or []
-        round_name = (notes[0].get("headline", "") if notes else "") or \
-                     (ev.get("week") or {}).get("displayValue", "") or "Rodada"
+    resultado.sort(key=lambda r: r["order"])
+    return resultado
+
+
+def _bracket_via_scoreboard_wide(slug: str) -> list | None:
+    """Busca TODOS os jogos mata-mata (6 meses) e agrupa por rodada com placar agregado."""
+    hoje   = datetime.now(tz=BRT).date()
+    inicio = (hoje - timedelta(days=210)).strftime("%Y%m%d")
+    fim    = (hoje + timedelta(days=90)).strftime("%Y%m%d")
+
+    eventos: list = []
+    # Tentativa com date range
+    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
+                     {"dates": f"{inicio}-{fim}", "limit": 500})
+    if data and data.get("events"):
+        eventos = data["events"]
+        print(f"[Bracket] {len(eventos)} eventos via date range para {slug}")
+
+    if not eventos:
+        # Fallback: chamadas mensais (8 meses)
+        vistos: set = set()
+        d = hoje
+        for _ in range(9):
+            r = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
+                          {"dates": d.strftime("%Y%m%d")})
+            if r:
+                for ev in r.get("events", []):
+                    eid = ev.get("id", "")
+                    if eid and eid not in vistos:
+                        vistos.add(eid)
+                        eventos.append(ev)
+            d -= timedelta(days=28)
+        print(f"[Bracket] {len(eventos)} eventos via chamadas mensais para {slug}")
+
+    if not eventos:
+        return None
+
+    # rounds_map: round_name -> {tie_key -> dict}
+    rounds_map:      dict[str, dict] = {}
+    round_sort_idx:  dict[str, int]  = {}
+
+    for ev in eventos:
+        comp        = (ev.get("competitions") or [{}])[0]
+        notes       = comp.get("notes") or []
+        raw_name    = ((notes[0].get("headline", "") if notes else "")
+                       or (ev.get("week") or {}).get("displayValue", "")
+                       or "Rodada")
+        round_name  = _normalize_round_name(raw_name)
         competitors = comp.get("competitors") or []
-        home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-        away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+        home  = next((c for c in competitors if c.get("homeAway") == "home"), {})
+        away  = next((c for c in competitors if c.get("homeAway") == "away"), {})
+        ht    = home.get("team") or {}
+        at    = away.get("team") or {}
+        hn    = ht.get("displayName", "")
+        an    = at.get("displayName", "")
+
         completed = (comp.get("status") or {}).get("type", {}).get("completed", False)
-        def _side(c):
-            t = c.get("team") or {}
-            g = _safe_score(c) if completed else ""
-            return {
-                "team": {"name": t.get("displayName", "TBD"), "logo": t.get("logo", ""), "abbr": t.get("abbreviation", "")},
-                "score": str(g), "aggregate": "", "winner": c.get("winner", False),
-            }
+        date_ev   = ev.get("date", "")
+        gh = _safe_score(home)
+        ga = _safe_score(away)
+
+        tie_key = tuple(sorted([hn, an]))
         if round_name not in rounds_map:
-            rounds_map[round_name] = []
-            round_order.append(round_name)
-        rounds_map[round_name].append({"home": _side(home), "away": _side(away)})
-    if not round_order:
-        return None
-    return [{"name": rn, "matchups": rounds_map[rn]} for rn in round_order]
+            rounds_map[round_name]     = {}
+            round_sort_idx[round_name] = _round_sort_key(round_name)
+
+        if tie_key not in rounds_map[round_name]:
+            rounds_map[round_name][tie_key] = {
+                "home_name": hn,  "away_name": an,
+                "home_team": ht,  "away_team": at,
+                "home_goals": 0,  "away_goals": 0,
+                "n_legs": 0,
+                "completed": False,
+                "date": date_ev,
+            }
+        tie = rounds_map[round_name][tie_key]
+        if completed:
+            tie["home_goals"] += gh
+            tie["away_goals"] += ga
+            tie["n_legs"]     += 1
+            tie["completed"]   = True
+        if date_ev and (not tie["date"] or date_ev < tie["date"]):
+            tie["date"] = date_ev
+
+    # Monta resultado ordenado por rodada
+    sorted_rnames = sorted(rounds_map.keys(),
+                           key=lambda rn: (round_sort_idx[rn], rn))
+    result = []
+    for rn in sorted_rnames:
+        ties_sorted = sorted(rounds_map[rn].values(), key=lambda t: t["date"])
+        matchups = []
+        for tie in ties_sorted:
+            hg, ag = tie["home_goals"], tie["away_goals"]
+            done   = tie["completed"]
+            hw     = done and hg > ag
+            aw     = done and ag > hg
+            matchups.append({
+                "home": {
+                    "team": {"name": tie["home_name"],
+                             "logo": tie["home_team"].get("logo", ""),
+                             "abbr": tie["home_team"].get("abbreviation", "")},
+                    "score": str(hg) if done else "", "aggregate": "", "winner": hw,
+                },
+                "away": {
+                    "team": {"name": tie["away_name"],
+                             "logo": tie["away_team"].get("logo", ""),
+                             "abbr": tie["away_team"].get("abbreviation", "")},
+                    "score": str(ag) if done else "", "aggregate": "", "winner": aw,
+                },
+            })
+        if matchups:
+            result.append({"name": rn, "matchups": matchups})
+    return result or None
 
 
 def buscar_chaveamento(slug: str) -> list | None:
     """Retorna lista de rodadas [{name, matchups}] para chaveamento mata-mata."""
-    for endpoint in (f"{ESPN_V2}/{slug}/bracket", f"{ESPN_V1}/{slug}/bracket"):
-        data = _espn_get(endpoint)
-        if not data:
-            continue
-        rounds_raw = (
-            (data.get("bracket") or {}).get("rounds")
-            or data.get("rounds")
-            or []
-        )
-        if rounds_raw:
-            parsed = _parsear_bracket_rounds(rounds_raw)
-            if parsed:
-                return parsed
-    return _bracket_via_scoreboard(slug)
+    ano = datetime.now().year
+
+    # 1. Tenta bracket endpoint da ESPN (temporada atual e anterior, v2 e v1)
+    for season in (ano, ano - 1, None):
+        for base in (ESPN_V2, ESPN_V1):
+            params = {"season": season} if season is not None else None
+            data = _espn_get(f"{base}/{slug}/bracket", params)
+            if not data:
+                continue
+            rounds_raw = (
+                (data.get("bracket") or {}).get("rounds")
+                or data.get("rounds") or []
+            )
+            if rounds_raw:
+                parsed = _parsear_bracket_rounds(rounds_raw)
+                # Só usa bracket API se retornou chaveamento completo (≥3 rodadas)
+                if parsed and len(parsed) >= 3:
+                    return parsed
+
+    # 2. Fallback: scoreboard de período amplo (cobrindo toda fase mata-mata)
+    return _bracket_via_scoreboard_wide(slug)
 
 
 # Layout constants for bracket rendering
@@ -1421,7 +1539,8 @@ async def gerar_chaveamento_png(rounds: list, nome_liga: str) -> str:
     logos = await _baixar_logos_paralelo(all_urls) if all_urls else {}
 
     n_rounds = len(rounds)
-    n_first  = len(rounds[0]["matchups"]) if rounds else 1
+    # n_first = maior número de partidas em qualquer rodada (normalmente a primeira)
+    n_first  = max((len(rd["matchups"]) for rd in rounds), default=1)
     bracket_h = n_first * _BK_SLOT_H
     bracket_w = n_rounds * (_BK_CARD_W + _BK_CON_W) - _BK_CON_W
     total_w   = _BK_PAD * 2 + bracket_w
@@ -1429,7 +1548,7 @@ async def gerar_chaveamento_png(rounds: list, nome_liga: str) -> str:
 
     def slot_cy(r_idx: int, m_idx: int) -> float:
         n = len(rounds[r_idx]["matchups"])
-        slots_per = n_first / n
+        slots_per = n_first / max(n, 1)
         return _BK_PAD + _BK_TITLE + (m_idx + 0.5) * slots_per * _BK_SLOT_H
 
     def card_x(r_idx: int) -> float:
@@ -1439,10 +1558,17 @@ async def gerar_chaveamento_png(rounds: list, nome_liga: str) -> str:
     svg_parts = []
     for r_idx in range(n_rounds - 1):
         n_this = len(rounds[r_idx]["matchups"])
-        for m_idx in range(0, n_this, 2):
-            cy1 = slot_cy(r_idx, m_idx)
-            cy2 = slot_cy(r_idx, m_idx + 1)
-            cyn = slot_cy(r_idx + 1, m_idx // 2)
+        n_next = len(rounds[r_idx + 1]["matchups"])
+        # Só desenha conectores se o próximo round tem metade das partidas
+        if n_next >= n_this:
+            continue
+        for m_idx in range(0, n_this - 1, 2):
+            next_m = m_idx // 2
+            if next_m >= n_next:
+                continue
+            cy1  = slot_cy(r_idx, m_idx)
+            cy2  = slot_cy(r_idx, m_idx + 1)
+            cyn  = slot_cy(r_idx + 1, next_m)
             x_r  = card_x(r_idx) + _BK_CARD_W
             x_mid = x_r + _BK_CON_W / 2
             x_n  = card_x(r_idx + 1)
