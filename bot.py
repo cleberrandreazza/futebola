@@ -57,7 +57,7 @@ LIGAS = {
 }
 
 # Ligas exibidas no !hoje e no resumo diário automático
-LIGAS_RESUMO = ["brasileirao", "premierleague", "sulamericana", "libertadores"]
+LIGAS_RESUMO = ["brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
 PASTA_LOGOS = "logos"
 os.makedirs(PASTA_LOGOS, exist_ok=True)
