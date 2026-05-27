@@ -405,12 +405,12 @@ def _safe_score(competitor: dict) -> int:
 
 def _parsear_entries(entries: list) -> list:
     resultado = []
-    for i, entry in enumerate(entries, 1):
+    for entry in entries:
         team  = entry.get("team", {})
         logos = team.get("logos", [])
         stats = entry.get("stats", [])
         resultado.append({
-            "rank": i,
+            "rank": 0,  # atribuído após ordenação
             "team": {
                 "name": team.get("displayName", ""),
                 "logo": logos[0]["href"] if logos else "",
@@ -424,6 +424,10 @@ def _parsear_entries(entries: list) -> list:
             "goalsDiff": _stat(stats, "pointDifferential"),
             "points":    _stat(stats, "points"),
         })
+    # Ordena: pontos desc → saldo de gols desc → vitórias desc
+    resultado.sort(key=lambda t: (-t["points"], -t["goalsDiff"], -t["all"]["win"]))
+    for i, t in enumerate(resultado, 1):
+        t["rank"] = i
     return resultado
 
 
