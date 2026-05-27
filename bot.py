@@ -32,11 +32,15 @@ HORARIO_RESUMO    = __import__("datetime").time(
 ESPN_V2 = "https://site.api.espn.com/apis/v2/sports/soccer"
 ESPN_V1 = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 
-# API-Football — usado apenas para Copa do Brasil (ESPN não cobre)
-# Free tier: seasons 2022-2024 apenas
-API_KEY_FUTEBOL = os.getenv("API_KEY_FUTEBOL")
-APIFOOTBALL_BASE = "https://v3.football.api-sports.io"
-APIFOOTBALL_HEADERS = {"x-apisports-key": API_KEY_FUTEBOL}
+# Bzzoiro Sports Data API — Copa do Brasil 2026
+BZZOIRO_TOKEN     = os.getenv("BZZOIRO_TOKEN", "")
+BZZOIRO_BASE      = "https://sports.bzzoiro.com/api/v2"
+_BZ_COPA_LEAGUE   = 35
+_BZ_COPA_SEASON   = 78
+_BZ_ROUND_NAMES   = {
+    1: "1ª Fase", 2: "2ª Fase", 3: "3ª Fase", 4: "4ª Fase",
+    5: "5ª Fase", 6: "Semifinais", 7: "Final",
+}
 
 # Competições de mata-mata: !tabela mostra rodada atual, não tabela de pontos
 LIGAS_COPA = {"copadobrasil"}
@@ -337,53 +341,220 @@ def _espn_get(url: str, params: dict = None) -> dict | None:
 
 
 # ==========================================
-# API-FOOTBALL — Copa do Brasil
+# BZZOIRO — Copa do Brasil 2026
 # ==========================================
 
-def _apifootball_get(endpoint: str, params: dict) -> dict | None:
+def _bzzoiro_get(endpoint: str, params: dict = None) -> dict | None:
+    if not BZZOIRO_TOKEN:
+        return None
     try:
         r = requests.get(
-            f"{APIFOOTBALL_BASE}/{endpoint}",
-            headers=APIFOOTBALL_HEADERS,
+            f"{BZZOIRO_BASE}/{endpoint.lstrip('/')}",
+            headers={"Authorization": f"Token {BZZOIRO_TOKEN}"},
             params=params,
             timeout=10,
         )
         if r.status_code == 200:
-            body = r.json()
-            if body.get("errors"):
-                print(f"[APIFoot] {endpoint} erros: {body['errors']}")
-                return None
-            return body
+            return r.json()
+        print(f"[Bzzoiro] {endpoint} -> HTTP {r.status_code}")
     except Exception as e:
-        print(f"[APIFoot] Erro: {e}")
+        print(f"[Bzzoiro] Erro {endpoint}: {e}")
     return None
 
 
-def buscar_rodada_copa_brasil() -> tuple[str, list]:
-    """Retorna (nome_rodada, fixtures) da rodada atual/mais recente da Copa do Brasil 2024."""
-    # Tenta rodada atual; se vazia, pega a última rodada da temporada
-    for params in (
-        {"league": 73, "season": 2024, "current": "true"},
-        {"league": 73, "season": 2024},
-    ):
-        data = _apifootball_get("fixtures/rounds", params)
-        if not data or not data.get("response"):
-            continue
-        rounds = data["response"]
-        round_name = rounds[0] if params.get("current") else rounds[-1]
-        fixtures_data = _apifootball_get(
-            "fixtures", {"league": 73, "season": 2024, "round": round_name}
-        )
-        if fixtures_data and fixtures_data.get("response"):
-            return (round_name, fixtures_data["response"])
-    return ("", [])
+_logo_cache_brasil: dict[str, str] = {}
+
+
+def _buscar_logos_brasileiros() -> dict[str, str]:
+    """Constrói mapa nome_time → logo_url a partir dos scoreboards ESPN de BRA.1/Libertadores/Sul-Americana."""
+    global _logo_cache_brasil
+    if _logo_cache_brasil:
+        return _logo_cache_brasil
+    mapa: dict[str, str] = {}
+    hoje   = datetime.now(tz=BRT).date()
+    inicio = (hoje - timedelta(days=120)).strftime("%Y%m%d")
+    fim    = (hoje + timedelta(days=30)).strftime("%Y%m%d")
+    for slug in ("BRA.1", "CONMEBOL.LIBERTADORES", "CONMEBOL.SUDAMERICANA"):
+        data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard",
+                         {"dates": f"{inicio}-{fim}", "limit": 500})
+        for ev in (data or {}).get("events", []):
+            comp = (ev.get("competitions") or [{}])[0]
+            for c in comp.get("competitors", []):
+                t    = c.get("team") or {}
+                name = t.get("displayName", "")
+                logo = t.get("logo", "")
+                if name and logo and name not in mapa:
+                    mapa[name] = logo
+    _logo_cache_brasil = mapa
+    return mapa
+
+
+def _bzzoiro_status(ev: dict) -> tuple[str, int | None]:
+    """(short_status, elapsed) a partir do formato Bzzoiro."""
+    bz  = ev.get("status", "notstarted")
+    per = (ev.get("period") or "").upper()
+    pen = ev.get("penalty_shootout")
+    if bz == "notstarted":
+        return "NS", None
+    if bz == "finished":
+        if pen:
+            return "PEN", None
+        if per in ("ET", "AET"):
+            return "AET", None
+        return "FT", None
+    if per == "HT":
+        return "HT", None
+    return "1H", ev.get("current_minute")
+
+
+def _bzzoiro_ev_to_fixture(ev: dict, logo_map: dict) -> dict:
+    """Converte evento Bzzoiro para o formato interno de fixture."""
+    short, elapsed = _bzzoiro_status(ev)
+    hn  = ev.get("home_team", "")
+    an  = ev.get("away_team", "")
+    pen = ev.get("penalty_shootout") or {}
+    return {
+        "fixture": {
+            "id":    str(ev.get("id", "0")),
+            "date":  ev.get("event_date", ""),
+            "status": {"short": short, "elapsed": elapsed},
+        },
+        "teams": {
+            "home": {"name": hn, "logo": logo_map.get(hn, "")},
+            "away": {"name": an, "logo": logo_map.get(an, "")},
+        },
+        "goals": {
+            "home": ev.get("home_score"),
+            "away": ev.get("away_score"),
+        },
+        "penalty": {"home": pen.get("home"), "away": pen.get("away")},
+        "meta":    {"canal": "", "liga": "Copa do Brasil"},
+    }
 
 
 def buscar_jogos_copa_hoje() -> list:
-    """Fixtures de hoje na Copa do Brasil 2024 via API-Football."""
-    data_hoje = datetime.now().strftime("%Y-%m-%d")
-    data = _apifootball_get("fixtures", {"league": 73, "season": 2024, "date": data_hoje})
-    return data.get("response", []) if data else []
+    """Fixtures de hoje na Copa do Brasil 2026 via Bzzoiro."""
+    hoje = datetime.now(tz=BRT).date()
+    data = _bzzoiro_get("events/", {
+        "league_id": _BZ_COPA_LEAGUE, "season_id": _BZ_COPA_SEASON,
+        "date_from": str(hoje), "date_to": str(hoje), "limit": 50,
+    })
+    if not data:
+        return []
+    logo_map = _buscar_logos_brasileiros()
+    return [_bzzoiro_ev_to_fixture(ev, logo_map) for ev in data.get("results", [])]
+
+
+def _bzzoiro_confrontos(events: list, logo_map: dict) -> list:
+    """Agrega partidas de ida+volta em confrontos com placar acumulado.
+    Retorna lista de fixtures no formato gerar_mata_mata_png."""
+    ties: dict[tuple, dict] = {}
+    for ev in sorted(events, key=lambda e: e.get("event_date", "")):
+        hid = ev.get("home_team_id", 0)
+        aid = ev.get("away_team_id", 0)
+        key = tuple(sorted([hid, aid]))
+        if key not in ties:
+            ties[key] = {
+                "home_id": hid, "home_name": ev["home_team"],
+                "away_id": aid, "away_name": ev["away_team"],
+                "home_goals": 0, "away_goals": 0,
+                "legs": 0, "total_legs": 0,
+                "pen": None, "status": "notstarted",
+                "date": ev.get("event_date", ""),
+            }
+        t = ties[key]
+        t["total_legs"] += 1
+        if ev["status"] == "finished":
+            t["legs"] += 1
+            hs = ev.get("home_score") or 0
+            as_ = ev.get("away_score") or 0
+            # Aggregate: normalize home/away relative to first team seen
+            if hid == t["home_id"]:
+                t["home_goals"] += hs
+                t["away_goals"] += as_
+            else:
+                t["home_goals"] += as_
+                t["away_goals"] += hs
+            pen = ev.get("penalty_shootout")
+            if pen:
+                # penalty winner: map back to home/away
+                if hid == t["home_id"]:
+                    t["pen"] = {"home": pen.get("home"), "away": pen.get("away")}
+                else:
+                    t["pen"] = {"home": pen.get("away"), "away": pen.get("home")}
+        elif ev["status"] not in ("finished",):
+            t["status"] = ev["status"]
+            t["date"] = ev.get("event_date", "")
+
+    fixtures = []
+    for t in ties.values():
+        if t["legs"] == 0:
+            short = "NS"
+        elif t["legs"] < t["total_legs"]:
+            short = "1H"   # ida jogada, volta pendente
+        elif t["pen"]:
+            short = "PEN"
+        else:
+            short = "FT"
+
+        fixtures.append({
+            "fixture": {
+                "id":   f"{t['home_id']}-{t['away_id']}",
+                "date": t["date"],
+                "status": {"short": short, "elapsed": None},
+            },
+            "teams": {
+                "home": {"name": t["home_name"], "logo": logo_map.get(t["home_name"], "")},
+                "away": {"name": t["away_name"], "logo": logo_map.get(t["away_name"], "")},
+            },
+            "goals": {
+                "home": t["home_goals"] if t["legs"] > 0 else None,
+                "away": t["away_goals"] if t["legs"] > 0 else None,
+            },
+            "penalty": t["pen"] or {},
+        })
+    # Ordena: ao vivo → pendentes → encerrados
+    order = {"1H": 0, "NS": 1, "FT": 2, "PEN": 2, "AET": 2}
+    fixtures.sort(key=lambda f: order.get(f["fixture"]["status"]["short"], 3))
+    return fixtures
+
+
+def buscar_rodada_copa_brasil() -> tuple[str, list]:
+    """Retorna (nome_rodada, confrontos_agregados) da Copa do Brasil 2026 via Bzzoiro."""
+    data = _bzzoiro_get("events/", {
+        "league_id": _BZ_COPA_LEAGUE, "season_id": _BZ_COPA_SEASON, "limit": 200,
+    })
+    if not data:
+        return ("", [])
+
+    events   = data.get("results", [])
+    logo_map = _buscar_logos_brasileiros()
+
+    # Agrupa por round_number
+    rounds: dict[object, list] = {}
+    for ev in events:
+        rn = ev.get("round_number")
+        rounds.setdefault(rn, []).append(ev)
+
+    # Prioridade: rodada com jogo ao vivo > rodada com jogos futuros > última completada
+    best: object = None
+    for rn in sorted(rounds, key=lambda x: (x is None, -(x or 0))):
+        evs      = rounds[rn]
+        statuses = {e["status"] for e in evs}
+        if any(s not in ("notstarted", "finished") for s in statuses):
+            best = rn; break
+        if "notstarted" in statuses and best is None:
+            best = rn
+
+    if best is None:
+        nums = [rn for rn in rounds if rn is not None]
+        best = max(nums) if nums else None
+    if best is None:
+        return ("", [])
+
+    nome      = _BZ_ROUND_NAMES.get(best, f"Fase {best}" if best is not None else "Próxima Fase")
+    confrontos = _bzzoiro_confrontos(rounds[best], logo_map)
+    return (nome, confrontos)
 
 
 def _stat(stats: list, name: str) -> int:
@@ -851,9 +1022,14 @@ async def gerar_mata_mata_png(fixtures: list, titulo: str, rodada: str = "") -> 
             cls_card = ""
         elif status in ("FT", "AET", "PEN"):
             label = {"FT": "Enc.", "AET": "Prorrg.", "PEN": "Pên."}.get(status, status)
+            pen   = f.get("penalty", {})
+            ph, pa = pen.get("home"), pen.get("away")
+            pen_html = (f'<div class="pen-score">({ph} × {pa} pen.)</div>'
+                        if status == "PEN" and ph is not None else "")
             placar_html = (
                 f'<div class="placar">{g_casa} <span class="sep">×</span> {g_fora}</div>'
                 f'<div class="label-enc">{label}</div>'
+                f'{pen_html}'
             )
             cls_card = " enc"
         elif status == "HT":
@@ -862,6 +1038,13 @@ async def gerar_mata_mata_png(fixtures: list, titulo: str, rodada: str = "") -> 
                 f'<div class="label-live">Intervalo</div>'
             )
             cls_card = " live"
+        elif status == "1H" and elapsed is None:
+            # Confronto agregado: ida jogada, volta pendente
+            placar_html = (
+                f'<div class="placar">{g_casa} <span class="sep">×</span> {g_fora}</div>'
+                f'<div class="label-enc">Agg · Volta pend.</div>'
+            )
+            cls_card = ""
         else:
             placar_html = (
                 f'<div class="placar live">{g_casa} <span class="sep">×</span> {g_fora}</div>'
@@ -905,6 +1088,7 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 .sep{color:#8892a4;font-weight:400;font-size:20px}
 .label-enc{font-size:10px;color:#8892a4;margin-top:3px;text-transform:uppercase;letter-spacing:.7px}
 .label-live{font-size:11px;color:#f87171;margin-top:3px;font-weight:600}
+.pen-score{font-size:11px;color:#93c5fd;margin-top:2px}
 .sigla{background:#0f3460;color:#ccc;padding:3px 7px;border-radius:4px;font-size:11px;font-weight:700}
 .vazio{color:#8892a4;text-align:center;padding:40px;font-size:14px}
 """
@@ -2553,10 +2737,11 @@ async def cmd_tabela(ctx, *, nome_liga: str = "brasileirao"):
 
     # Copa do Brasil: mata-mata — mostra rodada atual, não pontos corridos
     if chave in LIGAS_COPA:
-        msg = await ctx.send("🏆 Buscando rodada atual da **Copa do Brasil** (temporada 2024)...")
-        rodada, fixtures = buscar_rodada_copa_brasil()
+        msg = await ctx.send("🏆 Buscando rodada atual da **Copa do Brasil**...")
+        loop = asyncio.get_event_loop()
+        rodada, fixtures = await loop.run_in_executor(None, buscar_rodada_copa_brasil)
         if not fixtures:
-            await msg.edit(content="❌ Sem dados da Copa do Brasil. A API-Football free tier cobre até a temporada 2024.")
+            await msg.edit(content="❌ Sem dados da Copa do Brasil no momento.")
             return
         img = await gerar_mata_mata_png(fixtures, "Copa do Brasil", rodada)
         await msg.delete()
