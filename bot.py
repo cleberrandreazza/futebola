@@ -4162,8 +4162,13 @@ def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
 
 
 def buscar_eventos_hoje_bzzoiro() -> list[dict]:
-    """Retorna todos os eventos Bzzoiro de hoje (Brasileirão, Copa do Brasil, Libertadores, Sul-Americana)."""
-    hoje   = datetime.now(tz=BRT).date()
+    """Retorna todos os eventos Bzzoiro de hoje em BRT (Brasileirão, Copa do Brasil, Libertadores, Sul-Americana).
+
+    Bzzoiro armazena datas em UTC, então consultamos hoje+1 dia e filtramos em Python por data BRT,
+    evitando que jogos noturnos de ontem (00:30 UTC = 21:30 BRT ontem) apareçam como hoje.
+    """
+    hoje     = datetime.now(tz=BRT).date()
+    amanha   = hoje + timedelta(days=1)
     events: list[dict] = []
     leagues = [
         (_BZ_BRASILEIRAO_LEAGUE,  {}),
@@ -4172,10 +4177,19 @@ def buscar_eventos_hoje_bzzoiro() -> list[dict]:
         (_BZ_SULAMERICANA_LEAGUE, {}),
     ]
     for league_id, extra in leagues:
-        params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
+        params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(amanha), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
-        events.extend((data or {}).get("results", []))
+        for ev in (data or {}).get("results", []):
+            # Filtra apenas eventos cuja data em BRT é hoje
+            try:
+                ev_brt = datetime.fromisoformat(
+                    (ev.get("event_date") or "").replace("Z", "+00:00")
+                ).astimezone(BRT).date()
+            except Exception:
+                ev_brt = hoje  # mantém se não conseguir parsear
+            if ev_brt == hoje:
+                events.append(ev)
     return events
 
 
