@@ -2300,94 +2300,79 @@ _PLAYER_HTML = """\
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.js"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-html,body{{height:100%;background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif}}
-.layout{{display:flex;height:100vh;max-width:1700px;margin:0 auto}}
-.vcol{{flex:1;min-width:0;display:flex;flex-direction:column;padding:14px;gap:10px;overflow:hidden}}
-.vtitle{{font-size:15px;font-weight:700;color:#93c5fd;text-align:center;flex-shrink:0}}
-video{{width:100%;flex:1;min-height:0;background:#000;border-radius:10px;outline:none;display:block}}
-.vstatus{{font-size:12px;color:#8892a4;text-align:center;flex-shrink:0}}
-.dcol{{width:390px;flex-shrink:0;background:#161b22;border-left:1px solid #21262d;display:flex;flex-direction:column;height:100vh;overflow:hidden}}
-/* header */
-.dheader{{padding:14px 14px 10px;background:#16213e;border-bottom:1px solid #21262d;flex-shrink:0}}
-.comp{{font-size:10px;color:#8892a4;text-align:center;margin-bottom:8px}}
-.score-row{{display:flex;align-items:center;justify-content:space-between;gap:6px}}
-.team{{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;min-width:0}}
-.team img{{width:42px;height:42px;object-fit:contain}}
-.logo-ph{{width:42px;height:42px;background:#0f3460;border-radius:8px;flex-shrink:0}}
-.tname{{font-size:12px;font-weight:700;text-align:center;word-break:break-word}}
-.smid{{text-align:center;flex-shrink:0;min-width:84px}}
-.score{{font-size:42px;font-weight:800;color:#fff;letter-spacing:3px}}
-.ht{{font-size:10px;color:#8892a4;margin-top:2px}}
-.badge{{display:inline-block;padding:3px 10px;border-radius:10px;font-size:10px;font-weight:700;color:#fff;margin-top:6px}}
-.venue{{font-size:10px;color:#8892a4;margin-top:8px;text-align:center}}
-/* tabs */
-.tabs{{display:flex;flex-shrink:0;border-bottom:1px solid #21262d;background:#0d1117}}
-.tab{{flex:1;padding:9px 2px;text-align:center;font-size:10px;font-weight:700;color:#8892a4;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}}
+body{{background:#0d1117;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif}}
+/* ── vídeo ── */
+.vwrap{{background:#000;width:100%;line-height:0}}
+video{{width:100%;max-height:100vh;display:block;outline:none}}
+.vstatus{{font-size:12px;color:#8892a4;text-align:center;padding:6px;background:#0d1117}}
+/* ── score header ── */
+.dheader{{padding:14px 16px 12px;background:#16213e;border-bottom:1px solid #21262d}}
+.comp{{font-size:11px;color:#8892a4;text-align:center;margin-bottom:10px}}
+.score-row{{display:flex;align-items:center;justify-content:center;gap:8px}}
+.team{{display:flex;flex-direction:column;align-items:center;gap:7px;flex:1;min-width:0}}
+.team img{{width:52px;height:52px;object-fit:contain}}
+.logo-ph{{width:52px;height:52px;background:#0f3460;border-radius:10px}}
+.tname{{font-size:14px;font-weight:700;text-align:center}}
+.smid{{text-align:center;flex-shrink:0;min-width:110px}}
+.score{{font-size:52px;font-weight:800;color:#fff;letter-spacing:4px}}
+.ht{{font-size:11px;color:#8892a4;margin-top:3px}}
+.badge{{display:inline-block;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;margin-top:8px}}
+.venue{{font-size:11px;color:#8892a4;margin-top:10px;text-align:center}}
+/* ── tabs ── */
+.tabs{{display:flex;border-bottom:1px solid #21262d;background:#0d1117}}
+.tab{{flex:1;padding:11px 4px;text-align:center;font-size:12px;font-weight:700;color:#8892a4;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}}
 .tab.active{{color:#93c5fd;border-bottom-color:#3b82f6;background:#161b22}}
 .tab:hover:not(.active){{color:#cbd5e1}}
-.dcontent{{flex:1;overflow-y:auto}}
-/* incidents */
-.sec-hdr{{background:#1a2a5e;color:#93c5fd;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0}}
+/* ── sections ── */
+.sec-hdr{{background:#1a2a5e;color:#93c5fd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:8px 16px;display:flex;justify-content:space-between;align-items:center}}
 .updated{{font-size:9px;color:#4b5563;font-weight:400}}
-.inc-hdr,.inc-row{{display:flex;align-items:center;padding:0 10px}}
-.inc-h{{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:4px;text-align:right;padding:6px 5px;font-size:12px}}
-.inc-a{{flex:1;display:flex;align-items:center;gap:4px;text-align:left;padding:6px 5px;font-size:12px}}
-.inc-m{{width:50px;text-align:center;color:#93c5fd;font-size:11px;font-weight:700;flex-shrink:0}}
+/* ── incidents ── */
+.inc-hdr,.inc-row{{display:flex;align-items:center;padding:0 12px}}
+.inc-h{{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:7px 6px;font-size:13px}}
+.inc-a{{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:7px 6px;font-size:13px}}
+.inc-m{{width:60px;text-align:center;color:#93c5fd;font-size:12px;font-weight:700;flex-shrink:0}}
 .inc-row{{border-bottom:1px solid #0d1117}}
-.inc-sub .inc-h,.inc-sub .inc-a{{font-size:10px;color:#8892a4}}
-.ic{{font-size:14px;flex-shrink:0}}
-.assist{{color:#8892a4;font-size:10px}}
+.inc-sub .inc-h,.inc-sub .inc-a{{font-size:11px;color:#8892a4}}
+.ic{{font-size:16px;flex-shrink:0}}
+.assist{{color:#8892a4;font-size:11px}}
 .sub-in{{color:#10b981}}.sub-out{{color:#ef4444}}
-.psep{{background:#0f1c33;color:#6b7a99;text-align:center;font-size:10px;padding:5px;letter-spacing:1px}}
-/* stats */
-.stats-body{{padding:6px 14px 12px}}
-.stat-row{{display:flex;align-items:center;gap:6px;padding:7px 0;border-bottom:1px solid #0f1c33}}
-.sv{{width:40px;font-size:12px;font-weight:700;flex-shrink:0}}
+.psep{{background:#0f1c33;color:#6b7a99;text-align:center;font-size:11px;padding:6px;letter-spacing:1px}}
+/* ── stats ── */
+.stats-body{{padding:8px 16px 14px;max-width:700px;margin:0 auto}}
+.stat-row{{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0f1c33}}
+.sv{{width:48px;font-size:13px;font-weight:700;flex-shrink:0}}
 .sh{{text-align:right;color:#60a5fa}}.sa{{text-align:left;color:#fbbf24}}
-.sbar{{flex:1;height:5px;background:#0f3460;border-radius:3px;overflow:hidden}}
+.sbar{{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}}
 .sb-h{{background:#3b82f6;height:100%;float:right}}.sb-a{{background:#f59e0b;height:100%;float:left}}
-.slabel{{width:96px;text-align:center;font-size:10px;color:#8892a4;flex-shrink:0}}
-/* lineups */
-.lu-wrap{{display:flex}}
-.lu-col{{flex:1;padding:8px 10px;min-width:0}}
+.slabel{{width:130px;text-align:center;font-size:11px;color:#8892a4;flex-shrink:0}}
+/* ── lineups ── */
+.lu-wrap{{display:flex;max-width:700px;margin:0 auto}}
+.lu-col{{flex:1;padding:10px 14px;min-width:0}}
 .lu-col-r{{text-align:right}}
 .lu-div{{width:1px;background:#21262d;flex-shrink:0}}
-.lu-head{{font-size:11px;color:#93c5fd;font-weight:700;margin-bottom:7px;padding-bottom:5px;border-bottom:1px solid #21262d}}
-.pl{{display:flex;align-items:center;gap:4px;padding:4px 0;border-bottom:1px solid #0d1117;font-size:11px}}
+.lu-head{{font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #21262d}}
+.pl{{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid #0d1117;font-size:12px}}
 .pl-r{{justify-content:flex-end}}
-.pj{{width:20px;height:20px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:#93c5fd;flex-shrink:0;text-align:center}}
-.pp{{font-size:8px;color:#8892a4;width:12px;flex-shrink:0;text-align:center}}
-.pn{{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.no-data{{padding:20px;text-align:center;color:#4b5563;font-size:12px}}
-@media(max-width:960px){{
-  .layout{{flex-direction:column;height:auto}}
-  .vcol{{padding:10px;overflow:visible}}
-  video{{max-height:56vw;flex:none}}
-  .dcol{{width:100%;height:auto;border-left:none;border-top:1px solid #21262d}}
-}}
+.pj{{width:22px;height:22px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#93c5fd;flex-shrink:0;text-align:center}}
+.pp{{font-size:9px;color:#8892a4;width:14px;flex-shrink:0;text-align:center}}
+.pn{{font-size:12px;font-weight:500}}
+.no-data{{padding:24px;text-align:center;color:#4b5563;font-size:13px}}
 </style>
 </head>
 <body>
-<div class="layout">
-  <div class="vcol">
-    <div class="vtitle">⚽ {title}</div>
-    <video id="v" controls autoplay playsinline></video>
-    <div class="vstatus" id="vstatus">Conectando...</div>
-  </div>
-  <div class="dcol">
-    <div class="dheader" id="dheader"><div class="no-data">Carregando dados da partida...</div></div>
-    <div class="tabs" id="tabs" style="display:none">
-      <div class="tab active" data-tab="inc" onclick="showTab('inc')">⏱ Lance a Lance</div>
-      <div class="tab" data-tab="stats" onclick="showTab('stats')">📊 Stats</div>
-      <div class="tab" data-tab="lu" onclick="showTab('lu')">👥 Escalações</div>
-    </div>
-    <div class="dcontent">
-      <div id="tab-inc"></div>
-      <div id="tab-stats" style="display:none"></div>
-      <div id="tab-lu"    style="display:none"></div>
-    </div>
-  </div>
+<div class="vwrap">
+  <video id="v" controls autoplay playsinline></video>
 </div>
+<div class="vstatus" id="vstatus">Conectando...</div>
+<div id="dheader"><div class="no-data" style="padding:12px">Carregando dados da partida...</div></div>
+<div class="tabs" id="tabs" style="display:none">
+  <div class="tab active" data-tab="inc" onclick="showTab('inc')">⏱ Lance a Lance</div>
+  <div class="tab" data-tab="stats" onclick="showTab('stats')">📊 Estatísticas</div>
+  <div class="tab" data-tab="lu" onclick="showTab('lu')">👥 Escalações</div>
+</div>
+<div id="tab-inc"></div>
+<div id="tab-stats" style="display:none"></div>
+<div id="tab-lu"    style="display:none"></div>
 <script>
 const TOKEN    = location.pathname.split("/").pop();
 const PROXY    = "{server_url}/proxy/" + TOKEN;
