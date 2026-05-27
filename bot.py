@@ -242,11 +242,16 @@ def _iptv_buscar_canal(nome: str) -> dict | None:
     for c in canais:
         if c["name"].lower() == busca:
             candidatos.append(c)
-    # 2) busca contém o nome ou vice-versa
+    # 2) busca contém o nome — mas "espn" NÃO pode match "espn 2" (verificação de dígito)
     if not candidatos:
         for c in canais:
             n = c["name"].lower()
-            if busca in n or n in busca:
+            if busca in n:
+                idx   = n.index(busca)
+                resto = n[idx + len(busca):].lstrip()
+                if not resto or not resto[0].isdigit():
+                    candidatos.append(c)
+            elif n in busca:
                 candidatos.append(c)
     # 3) score por palavras
     if not candidatos:
@@ -502,6 +507,20 @@ _TV_POR_LIGA: dict[str, list[str]] = {
     "GER.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+", "RedeTV"],
     "FRA.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+"],
 }
+
+
+# Famílias de canais: quando a transmissão é genérica (ex: "ESPN"),
+# apresentamos todos os sub-canais para o usuário escolher
+_FAMILIA_CANAIS: dict[str, list[str]] = {
+    "espn":    ["ESPN", "ESPN 2", "ESPN 3"],
+    "sportv":  ["SporTV", "SporTV 2", "SporTV 3"],
+    "premiere": ["Premiere"],
+}
+
+
+def _familia_canal(nome: str) -> list[str] | None:
+    """Se o nome for um canal-base de família, retorna todos os sub-canais; senão None."""
+    return _FAMILIA_CANAIS.get(nome.lower().strip())
 
 
 def _canais_tv(jogo: dict, slug: str = "") -> list[str]:
@@ -1848,6 +1867,40 @@ class PlayerView(discord.ui.View):
         await interaction.response.send_message("Player fechado.", ephemeral=True)
 
 
+class _BotaoCanal(discord.ui.Button):
+    """Botão de seleção de canal dentro de SelecaoCanaisView."""
+    def __init__(self, label: str, canal: dict, event_id: str, slug: str,
+                 nome_casa: str, nome_fora: str):
+        super().__init__(label=label, style=discord.ButtonStyle.primary)
+        self.canal     = canal
+        self.event_id  = event_id
+        self.slug      = slug
+        self.nome_casa = nome_casa
+        self.nome_fora = nome_fora
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        title      = f"{self.nome_casa} × {self.nome_fora}"
+        token      = _criar_sessao(self.canal["url"], title, self.event_id, self.slug)
+        player_url = f"{SERVER_URL}/player/{token}"
+        for item in self.view.children:
+            item.disabled = True
+        await interaction.message.edit(view=self.view)
+        await interaction.followup.send(
+            f"📺 **{title}**\nCanal: **{self.canal['name']}**\n{player_url}",
+            ephemeral=False,
+        )
+
+
+class SelecaoCanaisView(discord.ui.View):
+    """View com botões para o usuário escolher o sub-canal (ESPN / ESPN 2 / ESPN 3)."""
+    def __init__(self, opcoes: list[tuple[str, dict]], event_id: str, slug: str,
+                 nome_casa: str, nome_fora: str):
+        super().__init__(timeout=120)
+        for nome, canal in opcoes:
+            self.add_item(_BotaoCanal(nome, canal, event_id, slug, nome_casa, nome_fora))
+
+
 class TransmitirButton(discord.ui.Button):
     def __init__(self, jogo: dict, row: int):
         super().__init__(label="📺 Abrir Player", style=discord.ButtonStyle.danger, row=row)
@@ -1870,23 +1923,59 @@ class TransmitirButton(discord.ui.Button):
         nome_fora = self.jogo["teams"]["away"]["name"]
 
         try:
-            broadcasts = _canais_tv(self.jogo, slug)
-            print(f"[Player] {nome_casa} × {nome_fora} → canais: {broadcasts}")
-            loop       = asyncio.get_event_loop()
+            broadcasts_api = list((self.jogo.get("meta") or {}).get("broadcasts", []))
+            broadcasts_all = _canais_tv(self.jogo, slug)
+            print(f"[Player] {nome_casa} × {nome_fora} → api={broadcasts_api} all={broadcasts_all}")
+            loop = asyncio.get_event_loop()
 
+            # 1. Tentar canal específico retornado pela API (ex: "ESPN 2")
             canal_iptv = None
-            for nome in broadcasts:
+            for nome in broadcasts_api:
                 canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
                 if canal_iptv:
-                    print(f"[Player] canal encontrado: {canal_iptv['name']}")
+                    print(f"[Player] canal API: {canal_iptv['name']}")
                     break
+
+            # 2. Se API retornou canal genérico (ex: "ESPN" sem número),
+            #    verificar se é uma família e apresentar seletor ao usuário
+            if not canal_iptv:
+                for nome in broadcasts_all:
+                    familia = _familia_canal(nome)
+                    if not familia:
+                        continue
+                    opcoes = []
+                    for n in familia:
+                        c = await loop.run_in_executor(None, _iptv_buscar_canal, n)
+                        if c:
+                            opcoes.append((n, c))
+                    if len(opcoes) > 1:
+                        # Mostrar seletor de sub-canal
+                        titulo_jogo = f"{nome_casa} × {nome_fora}"
+                        sel_view = SelecaoCanaisView(opcoes, self.event_id, slug,
+                                                     nome_casa, nome_fora)
+                        self.label = "📺 Escolher canal"
+                        await interaction.message.edit(view=self.view)
+                        await interaction.followup.send(
+                            f"📺 **{titulo_jogo}** — Qual canal está passando?",
+                            view=sel_view, ephemeral=True,
+                        )
+                        return
+                    elif opcoes:
+                        canal_iptv = opcoes[0][1]
+                    break
+
+            # 3. Fallback: primeiro canal disponível em broadcasts_all
+            if not canal_iptv:
+                for nome in broadcasts_all:
+                    canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
+                    if canal_iptv:
+                        break
 
             if canal_iptv:
                 stream_url = canal_iptv["url"]
                 title      = f"{nome_casa} × {nome_fora}"
                 token      = _criar_sessao(stream_url, title, self.event_id, slug)
                 player_url = f"{SERVER_URL}/player/{token}"
-
                 self.label = f"📺 {canal_iptv['name'][:20]}"
                 await interaction.message.edit(view=self.view)
                 await interaction.followup.send(
@@ -1894,7 +1983,7 @@ class TransmitirButton(discord.ui.Button):
                     ephemeral=False,
                 )
             else:
-                nome_canal  = broadcasts[0] if broadcasts else "Canal desconhecido"
+                nome_canal  = broadcasts_all[0] if broadcasts_all else "Canal desconhecido"
                 embed, _    = await _montar_embed_player(self.event_id, slug, nome_canal)
                 view_player = PlayerView(self.event_id, slug, nome_canal)
                 msg         = await interaction.channel.send(embed=embed, view=view_player)
@@ -1906,7 +1995,7 @@ class TransmitirButton(discord.ui.Button):
                 await interaction.message.edit(view=self.view)
                 await interaction.followup.send(
                     f"⚠️ Canal não encontrado na IPTV.\n"
-                    f"Transmissão prevista em: **{', '.join(broadcasts) or 'desconhecido'}**",
+                    f"Transmissão prevista em: **{', '.join(broadcasts_all) or 'desconhecido'}**",
                     ephemeral=True,
                 )
 
