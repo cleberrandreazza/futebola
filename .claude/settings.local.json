@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://site.api.espn.com/apis/v2/sports/soccer/BRA.1/standings\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(list\\(d.keys\\(\\)\\), indent=2\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(curl -s \"https://site.api.espn.com/apis/v2/sports/soccer/BRA.3/standings\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/v2/sports/soccer/UEFA.CHAMPIONS/standings\")",
+      "Bash(curl -s https://site.api.espn.com/apis/v2/sports/soccer/__TRACKED_VAR__/standings)",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/UEFA.CHAMPIONS/scoreboard\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/BRA.1/scoreboard\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/scoreboard?limit=100\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/v2/sports/soccer\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/scoreboard?dates=20260526&limit=200\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/client/v3/leagues?sport=soccer&limit=300\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/v2/sports/soccer/UEFA.CHAMPIONS/bracket\")",
+      "Bash(curl -s 'https://v3.football.api-sports.io/fixtures?league=73&season=2025&round=current' -H 'x-apisports-key: __CMDSUB_OUTPUT__')",
+      "Bash(curl -s \"https://www.thesportsdb.com/api/v1/json/3/search_all_leagues.php?c=Brazil&s=Soccer\")",
+      "Bash(curl -s \"https://www.thesportsdb.com/api/v1/json/3/eventsround.php?id=4962&r=4&s=2025\")",
+      "Bash(curl -s https://www.thesportsdb.com/api/v1/json/3/lookupleague.php?id=__TRACKED_VAR__)",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/copa-do-brasil/scoreboard\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('leagues',[{}]\\)[0].get\\('name','not found'\\)\\)\")",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/soccer/BRA.CDB/scoreboard\")",
+      "WebFetch(domain:www.reddit.com)",
+      "WebFetch(domain:old.reddit.com)",
+      "Bash(pip install *)",
+      "PowerShell(python -m pip install \"discord.py[voice]\" PyNaCl 2>&1)",
+      "PowerShell(ffmpeg -version 2>&1)",
+      "PowerShell(winget install Gyan.FFmpeg 2>&1)",
+      "PowerShell(python -m py_compile \"c:\\\\Users\\\\Usuario\\\\Desktop\\\\project\\\\football\\\\bot.py\" 2>&1)",
+      "PowerShell(if \\($?\\) { \"OK\" } else { \"ERRO\" })",
+      "PowerShell(python \"c:\\\\Users\\\\Usuario\\\\Desktop\\\\project\\\\football\\\\test_iptv.py\" 2>&1)",
+      "PowerShell(if \\($?\\) { \"OK\" })",
+      "PowerShell(python \"c:\\\\Users\\\\Usuario\\\\Desktop\\\\project\\\\football\\\\test_lib.py\" 2>&1)"
+    ]
+  }
+}
