@@ -985,20 +985,20 @@ def _canais_tv(jogo: dict, slug: str = "") -> list[str]:
 
 
 def buscar_artilheiros(slug: str) -> list:
-    """Retorna top artilheiros de uma liga via ESPN leaders endpoint."""
-    data = _espn_get(f"{ESPN_V1}/{slug}/leaders")
+    """Retorna top artilheiros de uma liga via ESPN statistics endpoint."""
+    data = _espn_get(f"{ESPN_V1}/{slug}/statistics")
     if not data:
         return []
     try:
-        for categoria in data.get("leaders", []):
-            nome_cat = categoria.get("name", "").lower()
-            if "goal" in nome_cat or "score" in nome_cat or "gol" in nome_cat:
+        for categoria in data.get("stats", []):
+            nome_cat = (categoria.get("name") or "").lower()
+            disp_cat = (categoria.get("displayName") or "").lower()
+            if "goal" in nome_cat or "goal" in disp_cat:
                 return categoria.get("leaders", [])
-        # Fallback: primeira categoria disponível
-        cats = data.get("leaders", [])
+        cats = data.get("stats", [])
         return cats[0].get("leaders", []) if cats else []
     except Exception as e:
-        print(f"[ESPN] Erro leaders {slug}: {e}")
+        print(f"[ESPN] Erro statistics {slug}: {e}")
         return []
 
 
@@ -1658,22 +1658,33 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 
 
 async def gerar_artilheiro_png(artilheiros: list, nome_liga: str) -> str:
+    # Coleta todas as URLs de logos para download paralelo
+    logo_urls = []
+    parsed = []
+    for art in artilheiros[:15]:
+        atleta   = art.get("athlete") or {}
+        time_obj = atleta.get("team") or {}
+        nome     = atleta.get("displayName", "?")
+        time_nm  = time_obj.get("displayName", "")
+        gols     = int(float(art.get("value") or 0))
+        logos    = time_obj.get("logos") or []
+        logo_url = logos[0].get("href", "") if logos else ""
+        logo_urls.append(logo_url)
+        parsed.append({"nome": nome, "time": time_nm, "gols": gols, "logo_url": logo_url})
+
+    logos_b64 = await _baixar_logos_paralelo([u for u in logo_urls if u])
     linhas = ""
-    for i, art in enumerate(artilheiros[:15], 1):
-        atleta = art.get("athlete", {})
-        nome   = atleta.get("displayName", "?")
-        time   = (art.get("team") or {}).get("displayName", "")
-        gols   = int(float(art.get("value", 0)))
-        logo_url = (art.get("team") or {}).get("logo", "") or (atleta.get("headshot") or {}).get("href", "")
-        b64 = _baixar_logo_base64(logo_url)
-        img  = f'<img src="{b64}" width="22" height="22" style="object-fit:contain">' if b64 else f'<span class="sigla">{time[:2].upper()}</span>'
+    for i, p in enumerate(parsed, 1):
+        b64      = logos_b64.get(p["logo_url"], "")
+        img      = (f'<img src="{b64}" width="22" height="22" style="object-fit:contain">'
+                    if b64 else f'<span class="sigla">{p["time"][:3].upper()}</span>')
         destaque = ' class="top"' if i == 1 else ""
-        linhas += (
+        linhas  += (
             f'<tr{destaque}>'
             f'<td class="pos">{i}</td>'
-            f'<td class="atleta">{img}<span>{nome}</span></td>'
-            f'<td class="clube">{time}</td>'
-            f'<td class="gols">{gols}</td>'
+            f'<td class="atleta">{img}<span>{p["nome"]}</span></td>'
+            f'<td class="clube">{p["time"]}</td>'
+            f'<td class="gols">{p["gols"]}</td>'
             f'</tr>'
         )
 
