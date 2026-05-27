@@ -3248,15 +3248,138 @@ def _botao_player_visivel(jogo: dict) -> bool:
 
 
 class SeguirView(discord.ui.View):
+    """Select menu com todos os jogos + botões Detalhes / Abrir Player para o selecionado."""
+
+    _LIVE_STATUSES = {"1H", "2H", "ET", "BT", "P", "LIVE"}
+
     def __init__(self, jogos: list, slug: str):
         super().__init__(timeout=600)
-        self.slug = slug
-        # 2 jogos por row → até 10 jogos em 5 rows (limit Discord)
-        for i, jogo in enumerate(jogos[:10]):
-            row = i // 2
-            self.add_item(DetalhesButton(jogo, row=row))
-            if IPTV_URL and _botao_player_visivel(jogo):
-                self.add_item(TransmitirButton(jogo, row=row))
+        self.slug  = slug
+        self.jogos = jogos[:25]
+        self.selected: dict | None = None
+
+        # Row 0 — Select menu
+        options = []
+        for i, j in enumerate(self.jogos):
+            short  = j["fixture"]["status"]["short"]
+            home   = j["teams"]["home"]["name"]
+            away   = j["teams"]["away"]["name"]
+            label  = f"{home[:18]} × {away[:18]}"[:100]
+            if short in self._LIVE_STATUSES:
+                elapsed = j["fixture"]["status"].get("elapsed") or ""
+                desc = f"🔴 Ao Vivo{' · ' + str(elapsed) + chr(39) if elapsed else ''}"
+            elif short == "HT":
+                desc = "⏸ Intervalo"
+            elif short in ("FT", "AET", "PEN"):
+                desc = "✅ Encerrado"
+            else:
+                try:
+                    dt  = datetime.fromisoformat(j["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
+                    desc = f"🕐 {dt.strftime('%H:%M')}"
+                except Exception:
+                    desc = "🕐 —"
+            options.append(discord.SelectOption(label=label, value=str(i), description=desc[:100]))
+
+        sel = discord.ui.Select(placeholder="🔍 Selecione um jogo...", options=options, row=0)
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+        # Row 1 — botões (desabilitados até seleção)
+        self.btn_det = discord.ui.Button(
+            label="📋 Detalhes", style=discord.ButtonStyle.primary, disabled=True, row=1)
+        self.btn_det.callback = self._on_detalhes
+        self.add_item(self.btn_det)
+
+        self.btn_play = discord.ui.Button(
+            label="📺 Abrir Player", style=discord.ButtonStyle.danger, disabled=True, row=1)
+        self.btn_play.callback = self._on_player
+        self.add_item(self.btn_play)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        idx = int(interaction.data["values"][0])
+        self.selected = self.jogos[idx]
+        short = self.selected["fixture"]["status"]["short"]
+        is_live = short in self._LIVE_STATUSES or short == "HT" or _botao_player_visivel(self.selected)
+        self.btn_det.disabled  = False
+        self.btn_play.disabled = not (IPTV_URL and is_live)
+        await interaction.response.edit_message(view=self)
+
+    async def _on_detalhes(self, interaction: discord.Interaction):
+        if not self.selected:
+            await interaction.response.send_message("Selecione um jogo primeiro.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        jogo      = self.selected
+        slug      = self.slug
+        broadcasts = _canais_tv(jogo, slug)
+        meta       = jogo.get("meta", {})
+        nome_casa  = jogo["teams"]["home"]["name"]
+        nome_fora  = jogo["teams"]["away"]["name"]
+        try:
+            dt = datetime.fromisoformat(jogo["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
+            data_hora = dt.strftime("%d/%m/%Y às %H:%M (BRT)")
+        except Exception:
+            data_hora = "—"
+        embed = discord.Embed(title=f"📋 {nome_casa} × {nome_fora}", color=0x3B82F6)
+        embed.add_field(name="🗓️ Data/Hora",   value=data_hora, inline=False)
+        embed.add_field(name="🏟️ Estádio",     value=meta.get("venue") or "Não informado", inline=False)
+        embed.add_field(name="📺 Transmissão", value="\n".join(broadcasts) if broadcasts else "Não informado", inline=False)
+        if meta.get("odds"):
+            embed.add_field(name="🎰 Odds", value=meta["odds"], inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _on_player(self, interaction: discord.Interaction):
+        if not self.selected:
+            await interaction.response.send_message("Selecione um jogo primeiro.", ephemeral=True)
+            return
+        self.btn_play.disabled = True
+        self.btn_play.label    = "⏳ Carregando..."
+        self.btn_play.style    = discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+        jogo      = self.selected
+        slug      = self.slug
+        nome_casa = jogo["teams"]["home"]["name"]
+        nome_fora = jogo["teams"]["away"]["name"]
+        event_id  = str(jogo["fixture"]["id"])
+        broadcasts_api = list((jogo.get("meta") or {}).get("broadcasts", []))
+        broadcasts_all = _canais_tv(jogo, slug)
+        loop = asyncio.get_event_loop()
+
+        candidatos: list[str] = []
+        for c in broadcasts_api + broadcasts_all:
+            if c not in candidatos:
+                candidatos.append(c)
+        for fb in ["ESPN FHD", "ESPN"]:
+            if fb not in candidatos:
+                candidatos.append(fb)
+
+        canal_iptv = None
+        for nome in candidatos:
+            canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
+            if canal_iptv:
+                break
+
+        if canal_iptv:
+            title      = f"{nome_casa} × {nome_fora}"
+            token      = _criar_sessao(canal_iptv["url"], title, event_id, slug,
+                                       None, nome_casa, nome_fora)
+            player_url = f"{SERVER_URL}/player/{token}"
+            self.btn_play.label = f"📺 {canal_iptv['name'][:20]}"
+            self.btn_play.style = discord.ButtonStyle.danger
+            await interaction.message.edit(view=self)
+            await interaction.followup.send(
+                f"📺 **{title}**\nCanal: **{canal_iptv['name']}**\n{player_url}",
+                ephemeral=False,
+            )
+        else:
+            self.btn_play.label = "❌ Sem canal"
+            self.btn_play.style = discord.ButtonStyle.secondary
+            await interaction.message.edit(view=self)
+            await interaction.followup.send(
+                f"⚠️ Canal não encontrado na IPTV para **{nome_casa} × {nome_fora}**.",
+                ephemeral=True,
+            )
 
 
 # ==========================================
