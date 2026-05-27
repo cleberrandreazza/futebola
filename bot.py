@@ -127,8 +127,11 @@ def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
 def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
     """Busca o event_id Bzzoiro para um jogo de hoje pelos nomes dos times."""
     hoje = datetime.now(tz=BRT).date()
-    qh = nome_casa.lower().strip()
-    qa = nome_fora.lower().strip()
+    qh_orig = nome_casa.lower().strip()
+    qa_orig = nome_fora.lower().strip()
+    # Aplica alias ESPN→Bzzoiro (ex: "atlético-mg" → "atlético mineiro")
+    qh = _ESPN_TO_BZ.get(qh_orig, qh_orig)
+    qa = _ESPN_TO_BZ.get(qa_orig, qa_orig)
 
     def _match(ev: dict) -> bool:
         bh = (ev.get("home_team") or "").lower()
@@ -435,6 +438,8 @@ _BZ_ESPN_ALIASES: dict[str, str] = {
     "Operário-PR":           "Operário PR",
     "Paysandu SC":           "Paysandu",
 }
+# Inverso: ESPN name → Bzzoiro name (para busca em _find_bz_event_id)
+_ESPN_TO_BZ: dict[str, str] = {v.lower(): k.lower() for k, v in _BZ_ESPN_ALIASES.items()}
 
 
 def _buscar_logos_brasileiros() -> dict[str, str]:
@@ -3129,14 +3134,13 @@ class _BotaoCanal(discord.ui.Button):
         self.nome_fora = nome_fora
 
     async def callback(self, interaction: discord.Interaction):
-        title    = f"{self.nome_casa} × {self.nome_fora}"
-        loop     = asyncio.get_event_loop()
-        bz_eid   = await loop.run_in_executor(None, _find_bz_event_id, self.nome_casa, self.nome_fora)
-        token    = _criar_sessao(self.canal["url"], title, self.event_id, self.slug, bz_eid, self.nome_casa, self.nome_fora)
+        title      = f"{self.nome_casa} × {self.nome_fora}"
+        token      = _criar_sessao(self.canal["url"], title, self.event_id, self.slug,
+                                   None, self.nome_casa, self.nome_fora)
         player_url = f"{SERVER_URL}/player/{token}"
         for item in self.view.children:
             item.disabled = True
-        # edit_message edita a mensagem efêmera do seletor desabilitando os botões
+        # Responde imediatamente para não expirar a interação (limite Discord = 3s)
         await interaction.response.edit_message(view=self.view)
         await interaction.followup.send(
             f"📺 **{title}**\nCanal: **{self.canal['name']}**\n{player_url}",
@@ -3226,8 +3230,8 @@ class TransmitirButton(discord.ui.Button):
             if canal_iptv:
                 stream_url = canal_iptv["url"]
                 title      = f"{nome_casa} × {nome_fora}"
-                bz_eid     = await loop.run_in_executor(None, _find_bz_event_id, nome_casa, nome_fora)
-                token      = _criar_sessao(stream_url, title, self.event_id, slug, bz_eid, nome_casa, nome_fora)
+                token      = _criar_sessao(stream_url, title, self.event_id, slug,
+                                           None, nome_casa, nome_fora)
                 player_url = f"{SERVER_URL}/player/{token}"
                 self.label = f"📺 {canal_iptv['name'][:20]}"
                 await interaction.message.edit(view=self.view)
