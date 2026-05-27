@@ -3370,31 +3370,68 @@ async def cmd_chaveamento(ctx, *, nome_liga: str = "champions"):
         await msg.edit(content=f"❌ Erro ao gerar chaveamento: `{e}`")
 
 
-@bot.command(name="ajuda")
-async def cmd_ajuda(ctx):
-    embed = discord.Embed(title="⚽ Football Bot — Comandos", color=0x3B82F6)
-    embed.add_field(name="!hoje",                    value="Jogos do dia em todas as ligas (imagem)",                          inline=False)
-    embed.add_field(name="!calendario dd/mm/yyyy",  value="Jogos de uma data específica. Ex: `!calendario 01/06/2026`",          inline=False)
-    embed.add_field(name="!liga [liga]",             value="Jogos da liga — botões para monitorar, ver detalhes e transmitir",  inline=False)
-    embed.add_field(name="!tabela [liga]",           value="Classificação da liga",                                            inline=False)
-    embed.add_field(name="!chaveamento [liga]",      value="Chaveamento mata-mata (bracket). Ex: `!chaveamento champions`",     inline=False)
-    embed.add_field(name="!artilheiro [liga]",       value="Top artilheiros da liga",                                          inline=False)
-    embed.add_field(name="!proximos [time]",          value="Próximos 5 jogos de um time (todas as ligas). Ex: `!proximos Flamengo`", inline=False)
-    embed.add_field(name="!proximos [liga] [time]",  value="Próximos 5 jogos em uma liga específica. Ex: `!proximos brasileirao Flamengo`", inline=False)
-    embed.add_field(name="!monitorando",             value="Lista jogos monitorados com botão para parar",                     inline=False)
-    if IPTV_URL:
-        embed.add_field(name="📺 IPTV", value=(
-            "`!canais [busca]` — Lista canais disponíveis na IPTV\n"
-            "`!transmitir [canal]` — Mostra qual canal sintonizar\n"
-            "Botão **📺 Abrir Player** nos jogos — player ao vivo no chat"
-        ), inline=False)
+def _build_ajuda_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="⚽ Football Bot — Comandos",
+        description="Use `!comando` ou `/comando` (slash). Os principais comandos têm autocomplete no Discord.",
+        color=0x3B82F6,
+    )
     embed.add_field(
-        name="Ligas disponíveis",
-        value="`" + "`  `".join(LIGAS.keys()) + "`",
+        name="📅  Jogos do Dia",
+        value=(
+            "`!hoje` `/hoje` — Jogos do dia em todas as ligas\n"
+            "`!calendario 01/06/2026` — Jogos de uma data específica\n"
+            "`!liga [liga]` — Jogos ao vivo e próximos de uma liga"
+        ),
         inline=False,
     )
-    embed.set_footer(text="Dados: ESPN API 2026 · Copa do Brasil via API-Football (temporada 2024)")
-    await ctx.send(embed=embed)
+    embed.add_field(
+        name="🏆  Ligas & Tabelas",
+        value=(
+            "`!tabela [liga]` `/tabela` — Classificação da liga\n"
+            "`!artilheiro [liga]` `/artilheiro` — Top artilheiros\n"
+            "`!chaveamento [liga]` `/chaveamento` — Bracket mata-mata"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔵  Times",
+        value=(
+            "`!proximos [time]` `/proximos` — Próximos 5 jogos (todas as ligas)\n"
+            "`!proximos [liga] [time]` — Próximos jogos em uma liga específica\n"
+            "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
+            "`!historico [time]` `/historico` — Partidas encerradas (últimos 60 dias)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔔  Monitoramento ao Vivo",
+        value=(
+            "`!monitorando` — Jogos sendo monitorados\n"
+            "`!seguir [id]` — Monitorar jogo ao vivo (updates automáticos)\n"
+            "`!parar [id]` — Parar monitoramento de um jogo"
+        ),
+        inline=False,
+    )
+    if IPTV_URL:
+        embed.add_field(
+            name="📺  IPTV",
+            value=(
+                "`!canais [busca]` — Listar canais disponíveis\n"
+                "`!transmitir [canal]` — Canal para sintonizar\n"
+                "Botão **📺 Abrir Player** nos jogos — player HLS ao vivo"
+            ),
+            inline=False,
+        )
+    ligas_str = "  ".join(f"`{k}`" for k in LIGAS.keys())
+    embed.add_field(name="Ligas disponíveis", value=ligas_str, inline=False)
+    embed.set_footer(text="Dados: ESPN · Bzzoiro · API-Football")
+    return embed
+
+
+@bot.command(name="ajuda")
+async def cmd_ajuda(ctx):
+    await ctx.send(embed=_build_ajuda_embed())
 
 
 # ==========================================
@@ -3934,6 +3971,11 @@ async def _time_autocomplete(
         for t in nomes
         if not busca or busca in t.lower()
     ][:25]
+
+
+@bot.tree.command(name="ajuda", description="Lista todos os comandos do bot")
+async def slash_ajuda(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=_build_ajuda_embed())
 
 
 @bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
