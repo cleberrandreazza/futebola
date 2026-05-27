@@ -498,6 +498,9 @@ def buscar_tabela(slug: str) -> dict | None:
     Ligas normais → {"type":"league","teams":[...]}."""
     ano  = datetime.now().year
     data = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": ano})
+    # Competições que cruzam anos (ex: UCL 2025/26 → season=2025) — tenta ano anterior
+    if not data or (not data.get("children") and not (data.get("standings") or {}).get("entries")):
+        data = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": ano - 1})
     if not data:
         return None
     forma = _buscar_forma_times(slug)
@@ -1312,6 +1315,213 @@ tr.top td.gols{color:#fbbf24;font-size:18px}
         f'<tbody>{linhas}</tbody></table></body></html>'
     )
     return await _html_para_png(html, "artilheiro_temp.png", width=600)
+
+
+def _parsear_bracket_rounds(rounds_raw: list) -> list | None:
+    """Converte rounds da ESPN bracket API para [{name, matchups:[{home,away}]}]."""
+    resultado = []
+    for r in rounds_raw:
+        matchups = []
+        for m in r.get("matchups", []):
+            comps = m.get("competitors", [])
+            if len(comps) < 2:
+                continue
+            def _parse_comp(c):
+                team = c.get("team") or {}
+                agg  = (c.get("aggregate") or {})
+                agg_score = (agg.get("score") or {}).get("displayValue", "")
+                s = c.get("score") or {}
+                score = s.get("displayValue", "") if isinstance(s, dict) else str(s)
+                return {
+                    "team": {
+                        "name": team.get("displayName", "TBD"),
+                        "logo": team.get("logo", ""),
+                        "abbr": team.get("abbreviation", ""),
+                    },
+                    "score":     score,
+                    "aggregate": agg_score,
+                    "winner":    c.get("winner", False) or agg.get("winner", False),
+                }
+            matchups.append({"home": _parse_comp(comps[0]), "away": _parse_comp(comps[1])})
+        if matchups:
+            resultado.append({"name": r.get("name", "Rodada"), "matchups": matchups})
+    return resultado or None
+
+
+def _bracket_via_scoreboard(slug: str) -> list | None:
+    """Fallback: monta bracket a partir do scoreboard agrupado por rodada."""
+    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard")
+    if not data:
+        return None
+    rounds_map: dict[str, list] = {}
+    round_order: list[str] = []
+    for ev in data.get("events", []):
+        comp = (ev.get("competitions") or [{}])[0]
+        notes = comp.get("notes") or []
+        round_name = (notes[0].get("headline", "") if notes else "") or \
+                     (ev.get("week") or {}).get("displayValue", "") or "Rodada"
+        competitors = comp.get("competitors") or []
+        home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+        away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+        completed = (comp.get("status") or {}).get("type", {}).get("completed", False)
+        def _side(c):
+            t = c.get("team") or {}
+            g = _safe_score(c) if completed else ""
+            return {
+                "team": {"name": t.get("displayName", "TBD"), "logo": t.get("logo", ""), "abbr": t.get("abbreviation", "")},
+                "score": str(g), "aggregate": "", "winner": c.get("winner", False),
+            }
+        if round_name not in rounds_map:
+            rounds_map[round_name] = []
+            round_order.append(round_name)
+        rounds_map[round_name].append({"home": _side(home), "away": _side(away)})
+    if not round_order:
+        return None
+    return [{"name": rn, "matchups": rounds_map[rn]} for rn in round_order]
+
+
+def buscar_chaveamento(slug: str) -> list | None:
+    """Retorna lista de rodadas [{name, matchups}] para chaveamento mata-mata."""
+    for endpoint in (f"{ESPN_V2}/{slug}/bracket", f"{ESPN_V1}/{slug}/bracket"):
+        data = _espn_get(endpoint)
+        if not data:
+            continue
+        rounds_raw = (
+            (data.get("bracket") or {}).get("rounds")
+            or data.get("rounds")
+            or []
+        )
+        if rounds_raw:
+            parsed = _parsear_bracket_rounds(rounds_raw)
+            if parsed:
+                return parsed
+    return _bracket_via_scoreboard(slug)
+
+
+# Layout constants for bracket rendering
+_BK_CARD_W = 190   # card width
+_BK_CARD_H = 58    # card height (2 × 26px team row + 6px divider)
+_BK_CON_W  = 44    # horizontal connector width between rounds
+_BK_PAD    = 26    # outer padding
+_BK_TITLE  = 52    # title area height
+_BK_SLOT_H = 74    # height per slot (card + spacing)
+
+
+async def gerar_chaveamento_png(rounds: list, nome_liga: str) -> str:
+    """Gera imagem de chaveamento (bracket tree) com SVG connector lines."""
+    if not rounds:
+        return None
+
+    all_urls = list({
+        m.get(side, {}).get("team", {}).get("logo", "")
+        for rd in rounds for m in rd.get("matchups", [])
+        for side in ("home", "away")
+        if m.get(side, {}).get("team", {}).get("logo")
+    })
+    logos = await _baixar_logos_paralelo(all_urls) if all_urls else {}
+
+    n_rounds = len(rounds)
+    n_first  = len(rounds[0]["matchups"]) if rounds else 1
+    bracket_h = n_first * _BK_SLOT_H
+    bracket_w = n_rounds * (_BK_CARD_W + _BK_CON_W) - _BK_CON_W
+    total_w   = _BK_PAD * 2 + bracket_w
+    total_h   = _BK_PAD * 2 + _BK_TITLE + bracket_h
+
+    def slot_cy(r_idx: int, m_idx: int) -> float:
+        n = len(rounds[r_idx]["matchups"])
+        slots_per = n_first / n
+        return _BK_PAD + _BK_TITLE + (m_idx + 0.5) * slots_per * _BK_SLOT_H
+
+    def card_x(r_idx: int) -> float:
+        return _BK_PAD + r_idx * (_BK_CARD_W + _BK_CON_W)
+
+    # SVG connector lines
+    svg_parts = []
+    for r_idx in range(n_rounds - 1):
+        n_this = len(rounds[r_idx]["matchups"])
+        for m_idx in range(0, n_this, 2):
+            cy1 = slot_cy(r_idx, m_idx)
+            cy2 = slot_cy(r_idx, m_idx + 1)
+            cyn = slot_cy(r_idx + 1, m_idx // 2)
+            x_r  = card_x(r_idx) + _BK_CARD_W
+            x_mid = x_r + _BK_CON_W / 2
+            x_n  = card_x(r_idx + 1)
+            c = "#3b82f6"
+            svg_parts += [
+                f'<line x1="{x_r:.1f}"   y1="{cy1:.1f}" x2="{x_mid:.1f}" y2="{cy1:.1f}" stroke="{c}" stroke-width="1.5"/>',
+                f'<line x1="{x_r:.1f}"   y1="{cy2:.1f}" x2="{x_mid:.1f}" y2="{cy2:.1f}" stroke="{c}" stroke-width="1.5"/>',
+                f'<line x1="{x_mid:.1f}" y1="{cy1:.1f}" x2="{x_mid:.1f}" y2="{cy2:.1f}" stroke="{c}" stroke-width="1.5"/>',
+                f'<line x1="{x_mid:.1f}" y1="{cyn:.1f}" x2="{x_n:.1f}"   y2="{cyn:.1f}" stroke="{c}" stroke-width="1.5"/>',
+            ]
+
+    # Match cards
+    cards_html = ""
+    for r_idx, rd in enumerate(rounds):
+        for m_idx, m in enumerate(rd["matchups"]):
+            cx = card_x(r_idx)
+            cy = slot_cy(r_idx, m_idx) - _BK_CARD_H / 2
+
+            def _team_row(side_key, is_winner):
+                side = m.get(side_key, {})
+                team = side.get("team", {})
+                nome = team.get("name", "TBD")[:22]
+                b64  = logos.get(team.get("logo", ""), "")
+                img  = (f'<img src="{b64}" width="18" height="18" style="object-fit:contain;flex-shrink:0;">'
+                        if b64 else f'<span class="sig">{team.get("abbr", nome[:3]).upper()[:3]}</span>')
+                agg   = side.get("aggregate", "")
+                score = side.get("score", "")
+                disp  = agg if agg else score
+                cls   = ' class="tr win"' if is_winner else ' class="tr"'
+                return f'<div{cls}>{img}<span class="tn">{nome}</span><span class="ts">{disp}</span></div>'
+
+            home_win = m.get("home", {}).get("winner", False)
+            away_win = m.get("away", {}).get("winner", False)
+            cards_html += (
+                f'<div class="mc" style="left:{cx:.0f}px;top:{cy:.0f}px">'
+                f'{_team_row("home", home_win)}'
+                f'<div class="sep"></div>'
+                f'{_team_row("away", away_win)}'
+                f'</div>'
+            )
+
+    labels_html = "".join(
+        f'<div class="rl" style="left:{card_x(r):.0f}px;width:{_BK_CARD_W}px">'
+        f'{rounds[r]["name"].upper()}</div>'
+        for r in range(n_rounds)
+    )
+    svg = (
+        f'<svg style="position:absolute;top:0;left:0;pointer-events:none" '
+        f'width="{total_w}" height="{total_h}" xmlns="http://www.w3.org/2000/svg">'
+        + "".join(svg_parts) + '</svg>'
+    )
+
+    css = f"""
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#111827;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;
+     width:{total_w}px;height:{total_h}px;position:relative;overflow:hidden}}
+.titulo{{position:absolute;top:{_BK_PAD}px;left:{_BK_PAD}px;
+         font-size:19px;font-weight:700;color:#fff}}
+.rl{{position:absolute;top:{_BK_PAD + _BK_TITLE - 20}px;text-align:center;
+     font-size:9px;font-weight:700;color:#6b7280;letter-spacing:1.2px}}
+.mc{{position:absolute;width:{_BK_CARD_W}px;background:#1e2f5e;
+     border-radius:8px;overflow:hidden;border:1px solid #243b73;z-index:1}}
+.tr{{display:flex;align-items:center;gap:6px;padding:4px 8px;height:26px}}
+.tr.win{{background:#1a3a6e}}
+.sep{{height:1px;background:#243b73}}
+.tn{{flex:1;font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.ts{{font-size:12px;font-weight:700;color:#f59e0b;min-width:18px;text-align:right}}
+.tr:not(.win) .ts{{color:#6b7280}}
+.sig{{background:#0f1f4a;color:#ccc;border-radius:3px;font-size:8px;font-weight:700;
+      flex-shrink:0;width:18px;height:18px;display:flex;align-items:center;justify-content:center}}
+"""
+    html = (
+        f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head>'
+        f'<body>'
+        f'<div class="titulo">⭐ {nome_liga} — Chaveamento {datetime.now().year}</div>'
+        f'{labels_html}{svg}{cards_html}'
+        f'</body></html>'
+    )
+    return await _html_para_png(html, "chaveamento_temp.png", width=total_w)
 
 
 async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str:
@@ -2196,7 +2406,7 @@ async def cmd_tabela(ctx, *, nome_liga: str = "brasileirao"):
         loop  = asyncio.get_event_loop()
         dados = await loop.run_in_executor(None, buscar_tabela, LIGAS[chave])
         if not dados:
-            await msg.edit(content="❌ Sem dados para esta liga. Tente outra ou aguarde a temporada começar.")
+            await msg.edit(content="❌ Sem dados de classificação para esta liga. Se for fase eliminatória, use `!chaveamento`.")
             return
         slug = LIGAS[chave]
         if dados["type"] == "groups":
@@ -2513,6 +2723,48 @@ async def cmd_proximos(ctx, liga: str = "", *, time: str = ""):
         await msg.edit(content=f"Erro ao gerar imagem: {e}")
 
 
+@bot.command(name="chaveamento")
+async def cmd_chaveamento(ctx, *, nome_liga: str = "champions"):
+    chave = nome_liga.lower().replace(" ", "")
+    if chave not in LIGAS:
+        ligas_disp = ", ".join(f"`{k}`" for k in LIGAS if k not in LIGAS_COPA)
+        await ctx.send(f"❌ Liga inválida. Use: {ligas_disp}")
+        return
+
+    msg = await ctx.send(f"🏆 Buscando chaveamento — **{nome_liga.title()}**...")
+
+    # Copa do Brasil: reutiliza gerar_mata_mata_png
+    if chave in LIGAS_COPA:
+        loop = asyncio.get_event_loop()
+        rodada, fixtures = await loop.run_in_executor(None, buscar_rodada_copa_brasil)
+        if not fixtures:
+            await msg.edit(content="❌ Sem dados da Copa do Brasil.")
+            return
+        img = await gerar_mata_mata_png(fixtures, "Copa do Brasil", rodada)
+        await msg.delete()
+        await ctx.send(file=discord.File(img))
+        return
+
+    slug = LIGAS[chave]
+    loop = asyncio.get_event_loop()
+    rounds = await loop.run_in_executor(None, buscar_chaveamento, slug)
+
+    if not rounds:
+        await msg.edit(content="❌ Chaveamento não disponível para esta liga no momento.")
+        return
+
+    meta = LIGAS_META.get(chave, {"nome": nome_liga.title(), "emoji": "🏆"})
+    nome_display = f"{meta['emoji']} {meta['nome']}"
+    try:
+        img = await gerar_chaveamento_png(rounds, nome_display)
+        await msg.delete()
+        await ctx.send(file=discord.File(img))
+    except Exception as e:
+        print(f"[!chaveamento] Erro: {e}")
+        import traceback; traceback.print_exc()
+        await msg.edit(content=f"❌ Erro ao gerar chaveamento: `{e}`")
+
+
 @bot.command(name="ajuda")
 async def cmd_ajuda(ctx):
     embed = discord.Embed(title="⚽ Football Bot — Comandos", color=0x3B82F6)
@@ -2520,6 +2772,7 @@ async def cmd_ajuda(ctx):
     embed.add_field(name="!calendario dd/mm/yyyy",  value="Jogos de uma data específica. Ex: `!calendario 01/06/2026`",          inline=False)
     embed.add_field(name="!liga [liga]",             value="Jogos da liga — botões para monitorar, ver detalhes e transmitir",  inline=False)
     embed.add_field(name="!tabela [liga]",           value="Classificação da liga",                                            inline=False)
+    embed.add_field(name="!chaveamento [liga]",      value="Chaveamento mata-mata (bracket). Ex: `!chaveamento champions`",     inline=False)
     embed.add_field(name="!artilheiro [liga]",       value="Top artilheiros da liga",                                          inline=False)
     embed.add_field(name="!proximos [liga] [time]",  value="Próximos 5 jogos de um time. Ex: `!proximos brasileirao Flamengo`", inline=False)
     embed.add_field(name="!monitorando",             value="Lista jogos monitorados com botão para parar",                     inline=False)
