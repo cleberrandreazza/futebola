@@ -3388,6 +3388,303 @@ async def cmd_ajuda(ctx):
 
 
 # ==========================================
+# DETALHES DA PARTIDA (Bzzoiro)
+# ==========================================
+
+def buscar_detalhes_partida(event_id: int) -> dict | None:
+    evento = _bzzoiro_get(f"events/{event_id}/")
+    if not evento or evento.get("error"):
+        return None
+    lineups   = _bzzoiro_get(f"events/{event_id}/lineups/")
+    stats_d   = _bzzoiro_get(f"events/{event_id}/stats/")
+    incidents = _bzzoiro_get(f"events/{event_id}/incidents/")
+    venue_id  = evento.get("venue_id")
+    venue     = _bzzoiro_get(f"venues/{venue_id}/") if venue_id else None
+    return {"evento": evento, "lineups": lineups or {}, "stats": stats_d or {},
+            "incidents": incidents or {}, "venue": venue or {}}
+
+
+def _bz_sv(side: dict, *keys) -> float:
+    for k in keys:
+        v = (side or {}).get(k)
+        if isinstance(v, dict):
+            v = v.get("actual") or v.get("value") or v.get("pct") or 0
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+async def gerar_partida_png(dados: dict) -> str:
+    evento       = dados.get("evento") or {}
+    lineups_d    = dados.get("lineups") or {}
+    stats_raw    = (dados.get("stats") or {}).get("stats") or {}
+    incidents_l  = (dados.get("incidents") or {}).get("incidents") or []
+    venue_info   = dados.get("venue") or {}
+
+    home_name  = evento.get("home_team", "Casa")
+    away_name  = evento.get("away_team", "Visitante")
+    home_score = evento.get("home_score")
+    away_score = evento.get("away_score")
+    ht_home    = evento.get("home_score_ht")
+    ht_away    = evento.get("away_score_ht")
+    status     = evento.get("status", "")
+    period     = (evento.get("period") or "").upper()
+    cur_min    = evento.get("current_minute")
+    league_id  = evento.get("league_id", 0)
+    liga_nome  = _BZ_LEAGUE_NAMES.get(league_id, "")
+    round_num  = evento.get("round_number")
+
+    try:
+        dt       = datetime.fromisoformat(evento.get("event_date","").replace("Z","+00:00")).astimezone(BRT)
+        data_fmt = dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        data_fmt = ""
+
+    if status == "notstarted":
+        badge_text, badge_color = "A INICIAR", "#8892a4"
+    elif status == "finished":
+        badge_text, badge_color = period or "FT", "#10b981"
+    else:
+        badge_text = f"{cur_min}'" if cur_min else "AO VIVO"
+        badge_color = "#ef4444"
+
+    has_score = status != "notstarted"
+    score_txt = f"{home_score} · {away_score}" if has_score else "vs"
+    ht_txt    = f"Intervalo {ht_home}-{ht_away}" if has_score and ht_home is not None else ""
+
+    comp_parts = [p for p in [liga_nome, f"Rodada {round_num}" if round_num else "", data_fmt] if p]
+    comp_line  = " · ".join(comp_parts)
+
+    venue_str  = " ".join(filter(None, [venue_info.get("name",""), venue_info.get("city","")])).strip(", ")
+
+    # Logos
+    logo_map  = _buscar_logos_brasileiros()
+    home_logo = logo_map.get(home_name, "")
+    away_logo = logo_map.get(away_name, "")
+    logos_b64 = await _baixar_logos_paralelo([u for u in [home_logo, away_logo] if u])
+    home_b64  = logos_b64.get(home_logo, "")
+    away_b64  = logos_b64.get(away_logo, "")
+
+    def logo_img(b64, size=64):
+        if b64:
+            return f'<img src="{b64}" width="{size}" height="{size}" style="object-fit:contain;display:block">'
+        return f'<div style="width:{size}px;height:{size}px;background:#0f3460;border-radius:8px"></div>'
+
+    # ── HEADER ──
+    html_header = f"""<div class="header">
+  <div class="comp-line">{comp_line}</div>
+  <div class="score-row">
+    <div class="team-box">{logo_img(home_b64)}<div class="tname">{home_name}</div></div>
+    <div class="score-mid">
+      <div class="score-big">{score_txt}</div>
+      {"<div class='ht-txt'>" + ht_txt + "</div>" if ht_txt else ""}
+      <span class="badge" style="background:{badge_color}">{badge_text}</span>
+    </div>
+    <div class="team-box">{logo_img(away_b64)}<div class="tname">{away_name}</div></div>
+  </div>
+  {"<div class='venue-row'>📍 " + venue_str + "</div>" if venue_str else ""}
+</div>"""
+
+    # ── INCIDENTS ──
+    def inc_min(inc):
+        m, a = inc.get("minute", 0), inc.get("added_time")
+        return f"{m}+{a}'" if a else f"{m}'"
+
+    inc_rows = ""
+    for inc in sorted(incidents_l, key=lambda i: (i.get("minute") or 0, i.get("added_time") or 0)):
+        t       = inc.get("type", "")
+        is_home = inc.get("is_home", True)
+        mn      = inc_min(inc)
+
+        if t == "period":
+            if "HT" in (inc.get("text","")).upper() or "HALF" in (inc.get("text","")).upper():
+                hs, as_ = inc.get("home_score",""), inc.get("away_score","")
+                inc_rows += f'<div class="period-sep">── INTERVALO {hs}–{as_} ──</div>'
+            continue
+
+        if t == "injuryTime":
+            inc_rows += (f'<div class="inc-row inc-sub"><div class="inc-h"></div>'
+                         f'<div class="inc-m">+{inc.get("length","?")}\'</div>'
+                         f'<div class="inc-a" style="font-size:10px;color:#6b7a99">acréscimos</div></div>')
+            continue
+
+        if t == "goal":
+            player = inc.get("player",""); assist = inc.get("assist","")
+            icon   = "⚽"
+            own    = inc.get("goal_type") == "own"
+            txt    = f'<b>{player}</b>' + (f' <span class="assist">({assist})</span>' if assist else "") + (' <span class="cg">CG</span>' if own else "")
+            if is_home:
+                inc_rows += f'<div class="inc-row"><div class="inc-h"><span class="ic">{icon}</span>{txt}</div><div class="inc-m">{mn}</div><div class="inc-a"></div></div>'
+            else:
+                inc_rows += f'<div class="inc-row"><div class="inc-h"></div><div class="inc-m">{mn}</div><div class="inc-a">{txt}<span class="ic">{icon}</span></div></div>'
+
+        elif t == "card":
+            player = inc.get("player",""); card = inc.get("card_type","yellow")
+            icon   = "🟡" if card == "yellow" else "🟥"
+            if is_home:
+                inc_rows += f'<div class="inc-row inc-sub"><div class="inc-h"><span class="ic">{icon}</span>{player}</div><div class="inc-m">{mn}</div><div class="inc-a"></div></div>'
+            else:
+                inc_rows += f'<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">{mn}</div><div class="inc-a">{player}<span class="ic">{icon}</span></div></div>'
+
+        elif t == "substitution":
+            p_in = inc.get("player_in",""); p_out = inc.get("player_out","")
+            txt  = f'<span class="sub-in">↑ {p_in}</span> <span class="sub-out">↓ {p_out}</span>'
+            if is_home:
+                inc_rows += f'<div class="inc-row inc-sub"><div class="inc-h">{txt}</div><div class="inc-m">{mn}</div><div class="inc-a"></div></div>'
+            else:
+                inc_rows += f'<div class="inc-row inc-sub"><div class="inc-h"></div><div class="inc-m">{mn}</div><div class="inc-a">{txt}</div></div>'
+
+    html_incidents = f"""<div class="section">
+  <div class="sec-title">⏱ Lance a Lance</div>
+  <div class="inc-hdr"><div class="inc-h" style="color:#8892a4;font-size:11px">{home_name}</div><div class="inc-m"></div><div class="inc-a" style="color:#8892a4;font-size:11px">{away_name}</div></div>
+  {inc_rows}
+</div>"""
+
+    # ── STATS ──
+    sh = stats_raw.get("home") or {}
+    sa = stats_raw.get("away") or {}
+
+    def stat_row(label, hv, av, fmt=".0f", pct=False):
+        total = hv + av
+        h_bar = round(hv) if pct else (round(hv / total * 100) if total > 0 else 50)
+        a_bar = 100 - h_bar
+        suf   = "%" if pct else ""
+        hd    = (f"{hv:.2f}" if fmt == ".2f" else f"{hv:.0f}") + suf
+        ad    = (f"{av:.2f}" if fmt == ".2f" else f"{av:.0f}") + suf
+        return (f'<div class="stat-row">'
+                f'<div class="sv sh">{hd}</div>'
+                f'<div class="sbar"><div class="sb-h" style="width:{h_bar}%"></div></div>'
+                f'<div class="slabel">{label}</div>'
+                f'<div class="sbar"><div class="sb-a" style="width:{a_bar}%"></div></div>'
+                f'<div class="sv sa">{ad}</div>'
+                f'</div>')
+
+    stats_rows = ""
+    if sh or sa:
+        stats_rows += stat_row("Posse de Bola",    _bz_sv(sh,"ball_possession"),           _bz_sv(sa,"ball_possession"),           pct=True)
+        stats_rows += stat_row("xG",               _bz_sv(sh,"xg","expected_goals"),        _bz_sv(sa,"xg","expected_goals"),        fmt=".2f")
+        stats_rows += stat_row("Finalizações",      _bz_sv(sh,"total_shots"),                _bz_sv(sa,"total_shots"))
+        stats_rows += stat_row("No Alvo",           _bz_sv(sh,"shots_on_target"),            _bz_sv(sa,"shots_on_target"))
+        stats_rows += stat_row("Dentro da Área",    _bz_sv(sh,"shots_inside_box"),           _bz_sv(sa,"shots_inside_box"))
+        stats_rows += stat_row("Precisão de Passe", _bz_sv(sh,"pass_accuracy_pct"),          _bz_sv(sa,"pass_accuracy_pct"),          pct=True)
+        stats_rows += stat_row("Escanteios",        _bz_sv(sh,"corner_kicks"),               _bz_sv(sa,"corner_kicks"))
+        stats_rows += stat_row("Faltas",            _bz_sv(sh,"fouls"),                      _bz_sv(sa,"fouls"))
+        stats_rows += stat_row("Cart. Amarelos",    _bz_sv(sh,"yellow_cards"),               _bz_sv(sa,"yellow_cards"))
+        stats_rows += stat_row("Defesas",           _bz_sv(sh,"goalkeeper_saves","total_saves"), _bz_sv(sa,"goalkeeper_saves","total_saves"))
+
+    html_stats = (f'<div class="section"><div class="sec-title">📊 Estatísticas</div>'
+                  f'<div class="stats-body">{stats_rows}</div></div>') if stats_rows else ""
+
+    # ── LINEUPS ──
+    lh = (lineups_d.get("lineups") or {}).get("home") or {}
+    la = (lineups_d.get("lineups") or {}).get("away") or {}
+    home_xi   = lh.get("players") or []
+    away_xi   = la.get("players") or []
+    home_form = lh.get("formation","")
+    away_form = la.get("formation","")
+
+    def pl_home(p):
+        return (f'<div class="pl-row">'
+                f'<span class="pl-jersey">{p.get("jersey_number","")}</span>'
+                f'<span class="pl-pos">{p.get("position","")}</span>'
+                f'<span class="pl-name">{p.get("name","")}</span>'
+                f'</div>')
+
+    def pl_away(p):
+        return (f'<div class="pl-row pl-away">'
+                f'<span class="pl-name">{p.get("name","")}</span>'
+                f'<span class="pl-pos">{p.get("position","")}</span>'
+                f'<span class="pl-jersey">{p.get("jersey_number","")}</span>'
+                f'</div>')
+
+    html_lineups = ""
+    if home_xi or away_xi:
+        home_header = f'{home_name}{"  (" + home_form + ")" if home_form else ""}'
+        away_header = f'{away_name}{"  (" + away_form + ")" if away_form else ""}'
+        html_lineups = (f'<div class="section"><div class="sec-title">👥 Escalações</div>'
+                        f'<div class="lineups-row">'
+                        f'<div class="lu-col"><div class="lu-head">{home_header}</div>{"".join(pl_home(p) for p in home_xi)}</div>'
+                        f'<div class="lu-div"></div>'
+                        f'<div class="lu-col lu-col-away"><div class="lu-head">{away_header}</div>{"".join(pl_away(p) for p in away_xi)}</div>'
+                        f'</div></div>')
+
+    # ── CSS ──
+    css = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;width:680px}
+.header{background:#16213e;padding:20px 24px;text-align:center}
+.comp-line{font-size:12px;color:#8892a4;margin-bottom:14px}
+.score-row{display:flex;align-items:center;justify-content:center}
+.team-box{flex:1;display:flex;flex-direction:column;align-items:center;gap:8px}
+.tname{font-size:14px;font-weight:600;text-align:center;max-width:140px}
+.score-mid{width:180px;text-align:center;flex-shrink:0}
+.score-big{font-size:50px;font-weight:800;color:#fff;letter-spacing:3px}
+.ht-txt{font-size:12px;color:#8892a4;margin-top:2px}
+.badge{display:inline-block;padding:3px 14px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;margin-top:8px}
+.venue-row{font-size:12px;color:#8892a4;margin-top:12px}
+.section{border-top:2px solid #0d1b2a}
+.sec-title{background:#1a2a5e;color:#93c5fd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:8px 20px}
+.inc-hdr,.inc-row{display:flex;align-items:center;padding:0 16px}
+.inc-h{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:5px;text-align:right;padding:7px 8px;font-size:13px}
+.inc-a{flex:1;display:flex;align-items:center;gap:5px;text-align:left;padding:7px 8px;font-size:13px}
+.inc-m{width:64px;text-align:center;color:#93c5fd;font-size:12px;font-weight:700;flex-shrink:0}
+.inc-row{border-bottom:1px solid #111827}
+.inc-sub .inc-h,.inc-sub .inc-a{font-size:11px;color:#8892a4}
+.ic{font-size:16px;flex-shrink:0}
+.assist{color:#8892a4;font-size:11px}
+.cg{color:#ef4444;font-size:10px;font-weight:700}
+.sub-in{color:#10b981}
+.sub-out{color:#ef4444}
+.period-sep{background:#0f1c33;color:#8892a4;text-align:center;font-size:11px;padding:7px;letter-spacing:1px}
+.stats-body{background:#16213e;padding:6px 20px 10px}
+.stat-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #0f1c33}
+.sv{width:52px;font-size:13px;font-weight:700;flex-shrink:0}
+.sh{text-align:right;color:#60a5fa}
+.sa{text-align:left;color:#fbbf24}
+.sbar{flex:1;height:5px;background:#0f3460;border-radius:3px;overflow:hidden}
+.sb-h{background:#3b82f6;height:100%;float:right}
+.sb-a{background:#f59e0b;height:100%;float:left}
+.slabel{width:140px;text-align:center;font-size:11px;color:#8892a4;flex-shrink:0}
+.lineups-row{display:flex;background:#16213e;padding:12px 0}
+.lu-col{flex:1;padding:8px 18px}
+.lu-col-away{text-align:right}
+.lu-div{width:1px;background:#1e2f5e;flex-shrink:0}
+.lu-head{font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #1e2f5e}
+.pl-row{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid #0f1c33;font-size:12px}
+.pl-away{justify-content:flex-end}
+.pl-jersey{width:24px;height:24px;background:#0f3460;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#93c5fd;flex-shrink:0;line-height:24px;text-align:center}
+.pl-pos{font-size:9px;color:#8892a4;width:14px;flex-shrink:0;text-align:center}
+.pl-name{font-size:12px;font-weight:500}
+"""
+
+    html = (f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
+            f'{html_header}{html_incidents}{html_stats}{html_lineups}</body></html>')
+    return await _html_para_png(html, "partida_temp.png", width=680)
+
+
+@bot.command(name="partida")
+async def cmd_partida(ctx, event_id: str = ""):
+    if not event_id or not event_id.isdigit():
+        await ctx.send("Uso: `!partida [event_id]`\nEx: `!partida 7151`\nO ID da partida pode ser encontrado em https://sports.bzzoiro.com/matches/{id}/")
+        return
+    msg  = await ctx.send(f"🔍 Buscando detalhes da partida **{event_id}**...")
+    loop = asyncio.get_event_loop()
+    dados = await loop.run_in_executor(None, buscar_detalhes_partida, int(event_id))
+    if not dados:
+        await msg.edit(content=f"❌ Partida `{event_id}` não encontrada.")
+        return
+    try:
+        caminho = await gerar_partida_png(dados)
+        await msg.delete()
+        await ctx.send(file=discord.File(caminho))
+    except Exception as e:
+        await msg.edit(content=f"Erro ao gerar imagem: {e}")
+
+
+# ==========================================
 # SLASH COMMANDS — autocomplete nativo do Discord
 # ==========================================
 
@@ -3595,6 +3892,25 @@ async def slash_proximos(interaction: discord.Interaction, time: str, liga: str 
         return
     try:
         caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+        await interaction.followup.send(file=discord.File(caminho))
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+
+
+@bot.tree.command(name="partida", description="Detalhes completos de uma partida (Bzzoiro ID)")
+@discord.app_commands.describe(event_id="ID da partida no Bzzoiro (ex: 7151)")
+async def slash_partida(interaction: discord.Interaction, event_id: str):
+    if not event_id.isdigit():
+        await interaction.response.send_message("Informe um ID numérico. Ex: `7151`", ephemeral=True)
+        return
+    await interaction.response.defer()
+    loop  = asyncio.get_event_loop()
+    dados = await loop.run_in_executor(None, buscar_detalhes_partida, int(event_id))
+    if not dados:
+        await interaction.followup.send(f"❌ Partida `{event_id}` não encontrada.")
+        return
+    try:
+        caminho = await gerar_partida_png(dados)
         await interaction.followup.send(file=discord.File(caminho))
     except Exception as e:
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
