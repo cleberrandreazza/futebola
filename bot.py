@@ -3675,6 +3675,62 @@ body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
     return await _html_para_png(html, "partida_temp.png", width=680)
 
 
+def _buscar_partidas_passadas(nome_time: str, dias: int = 60) -> tuple[list[dict], str] | None:
+    """Retorna (events, display_name) das partidas encerradas de um time nos últimos N dias."""
+    team_map = _bz_build_team_map()
+    busca    = nome_time.lower().strip()
+    result   = team_map.get(busca)
+    if not result:
+        best, best_score = None, 0
+        for norm, val in team_map.items():
+            if busca in norm or norm in busca:
+                score = len(set(busca) & set(norm))
+                if score > best_score:
+                    best_score, best = score, val
+        result = best
+    if not result:
+        return None
+    team_id, display_name = result
+    hoje = datetime.now(tz=BRT).date()
+    data = _bzzoiro_get("events/", {
+        "date_from": str(hoje - timedelta(days=dias)),
+        "date_to":   str(hoje),
+        "limit": 300,
+    })
+    events = [
+        ev for ev in (data or {}).get("results", [])
+        if (ev.get("home_team_id") == team_id or ev.get("away_team_id") == team_id)
+        and ev.get("status") == "finished"
+    ]
+    events.sort(key=lambda e: e.get("event_date", ""), reverse=True)
+    return (events[:25], display_name) if events else None
+
+
+def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
+    """Constrói SelectOptions para histórico: label=times, description=data+placar."""
+    opts: list[discord.SelectOption] = []
+    _emoji = {9: "🇧🇷", 35: "🏆"}
+    for ev in events:
+        eid = ev.get("id")
+        if not eid:
+            continue
+        home    = ev.get("home_team", "?")
+        away    = ev.get("away_team", "?")
+        emoji   = _emoji.get(ev.get("league_id", 0), "⚽")
+        h_score = ev.get("home_score", "")
+        a_score = ev.get("away_score", "")
+        placar  = f"{h_score}-{a_score}" if h_score != "" and a_score != "" else "? - ?"
+        try:
+            dt      = datetime.fromisoformat(ev.get("event_date", "").replace("Z", "+00:00")).astimezone(BRT)
+            data_str = dt.strftime("%d/%m/%Y")
+        except Exception:
+            data_str = ""
+        label = f"{emoji} {home} × {away}"[:100]
+        desc  = f"{data_str} · {placar}" if data_str else placar
+        opts.append(discord.SelectOption(label=label, value=str(eid), description=desc[:100]))
+    return opts[:25]
+
+
 def buscar_eventos_hoje_bzzoiro() -> list[dict]:
     """Retorna todos os eventos Bzzoiro de hoje (Brasileirão + Copa do Brasil)."""
     hoje   = datetime.now(tz=BRT).date()
@@ -3796,6 +3852,29 @@ async def cmd_partida(ctx, *, query: str = ""):
         await ctx.send(file=discord.File(caminho))
     except Exception as e:
         await msg.edit(content=f"Erro ao gerar imagem: {e}")
+
+
+@bot.command(name="historico")
+async def cmd_historico(ctx, *, query: str = ""):
+    if not query:
+        await ctx.send("Uso: `!historico [time]`\nEx: `!historico Flamengo`")
+        return
+    msg  = await ctx.send(f"🔍 Buscando histórico de **{query}**...")
+    loop = asyncio.get_event_loop()
+    res  = await loop.run_in_executor(None, _buscar_partidas_passadas, query.strip())
+    if not res:
+        await msg.edit(content=f"❌ Nenhuma partida encerrada encontrada para **{query}** nos últimos 60 dias.")
+        return
+    events, nome_oficial = res
+    opcoes = _build_historico_options(events)
+    if not opcoes:
+        await msg.edit(content=f"❌ Nenhuma partida disponível para **{nome_oficial}**.")
+        return
+    view = PartidaSelectView(opcoes)
+    await msg.edit(
+        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 60 dias)\nSelecione uma partida para ver os detalhes:",
+        view=view,
+    )
 
 
 # ==========================================
@@ -4030,6 +4109,28 @@ async def slash_partida(interaction: discord.Interaction, time: str):
         await interaction.followup.send(file=discord.File(cam))
     except Exception as e:
         await interaction.followup.send(f"Erro: {e}")
+
+
+@bot.tree.command(name="historico", description="Ver partidas passadas de um time e seus detalhes")
+@discord.app_commands.describe(time="Nome do time (ex: Flamengo)")
+@discord.app_commands.autocomplete(time=_time_autocomplete)
+async def slash_historico(interaction: discord.Interaction, time: str):
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    res  = await loop.run_in_executor(None, _buscar_partidas_passadas, time.strip())
+    if not res:
+        await interaction.followup.send(f"❌ Nenhuma partida encerrada encontrada para **{time}** nos últimos 60 dias.")
+        return
+    events, nome_oficial = res
+    opcoes = _build_historico_options(events)
+    if not opcoes:
+        await interaction.followup.send(f"❌ Nenhuma partida disponível para **{nome_oficial}**.")
+        return
+    view = PartidaSelectView(opcoes)
+    await interaction.followup.send(
+        content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 60 dias)\nSelecione uma partida para ver os detalhes:",
+        view=view,
+    )
 
 
 if not TOKEN_DO_DISCORD:
