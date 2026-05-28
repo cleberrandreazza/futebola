@@ -4361,6 +4361,10 @@ async def _gerar_partida_html(dados: dict) -> str:
     liga_nome  = _BZ_LEAGUE_NAMES.get(league_id, "")
     round_num  = evento.get("round_number")
 
+    pen_info   = evento.get("penalty_shootout") or {}
+    referee    = evento.get("referee", "")
+    attendance = evento.get("attendance")
+
     try:
         dt       = datetime.fromisoformat(evento.get("event_date","").replace("Z","+00:00")).astimezone(BRT)
         data_fmt = dt.strftime("%d/%m/%Y %H:%M")
@@ -4370,14 +4374,21 @@ async def _gerar_partida_html(dados: dict) -> str:
     if status == "notstarted":
         badge_text, badge_color = "A INICIAR", "#8892a4"
     elif status == "finished":
-        badge_text, badge_color = period or "FT", "#10b981"
+        if pen_info:
+            badge_text = "PÊNALTIS"
+        elif period in ("ET", "AET"):
+            badge_text = "PRORROGAÇÃO"
+        else:
+            badge_text = "ENCERRADO"
+        badge_color = "#10b981"
     else:
         badge_text = f"{cur_min}'" if cur_min else "AO VIVO"
         badge_color = "#ef4444"
 
     has_score = status != "notstarted"
     score_txt = f"{home_score} · {away_score}" if has_score else "vs"
-    ht_txt    = f"Intervalo {ht_home}-{ht_away}" if has_score and ht_home is not None else ""
+    ht_txt    = f"Intervalo {ht_home}–{ht_away}" if has_score and ht_home is not None else ""
+    pen_txt   = f"Pênaltis {pen_info.get('home','?')}–{pen_info.get('away','?')}" if pen_info else ""
 
     comp_parts = [p for p in [liga_nome, f"Rodada {round_num}" if round_num else "", data_fmt] if p]
     comp_line  = " · ".join(comp_parts)
@@ -4397,19 +4408,52 @@ async def _gerar_partida_html(dados: dict) -> str:
             return f'<img src="{b64}" width="{size}" height="{size}" style="object-fit:contain;display:block">'
         return f'<div style="width:{size}px;height:{size}px;background:#0f3460;border-radius:8px"></div>'
 
+    # ── GOALSCORERS (extrair de incidents) ──
+    def _gols_lado(is_home: bool) -> str:
+        gols = []
+        for inc in sorted(incidents_l, key=lambda i: (i.get("minute") or 0)):
+            if inc.get("type") != "goal" or bool(inc.get("is_home", True)) != is_home:
+                continue
+            mn  = inc.get("minute", "")
+            add = inc.get("added_time")
+            mn_str = f"{mn}+{add}'" if add else f"{mn}'"
+            own = inc.get("goal_type") == "own"
+            gols.append(f'{inc.get("player","?")} {mn_str}{"  cg" if own else ""}')
+        return " / ".join(gols)
+
+    home_gols_str = _gols_lado(True)
+    away_gols_str = _gols_lado(False)
+
     # ── HEADER ──
+    meta_rows = ""
+    if venue_str:
+        meta_rows += f'<div class="meta-item">📍 {venue_str}</div>'
+    if referee:
+        meta_rows += f'<div class="meta-item">👨‍⚖️ {referee}</div>'
+    if attendance:
+        meta_rows += f'<div class="meta-item">👥 {int(attendance):,} pessoas'.replace(",",".")+'</div>'
+
     html_header = f"""<div class="header">
   <div class="comp-line">{comp_line}</div>
   <div class="score-row">
-    <div class="team-box">{logo_img(home_b64)}<div class="tname">{home_name}</div></div>
+    <div class="team-box">
+      {logo_img(home_b64)}
+      <div class="tname">{home_name}</div>
+      {"<div class='goal-scorers'>" + home_gols_str + "</div>" if home_gols_str else ""}
+    </div>
     <div class="score-mid">
       <div class="score-big">{score_txt}</div>
       {"<div class='ht-txt'>" + ht_txt + "</div>" if ht_txt else ""}
+      {"<div class='pen-txt'>" + pen_txt + "</div>" if pen_txt else ""}
       <span class="badge" style="background:{badge_color}">{badge_text}</span>
     </div>
-    <div class="team-box">{logo_img(away_b64)}<div class="tname">{away_name}</div></div>
+    <div class="team-box">
+      {logo_img(away_b64)}
+      <div class="tname">{away_name}</div>
+      {"<div class='goal-scorers'>" + away_gols_str + "</div>" if away_gols_str else ""}
+    </div>
   </div>
-  {"<div class='venue-row'>📍 " + venue_str + "</div>" if venue_str else ""}
+  {"<div class='meta-row'>" + meta_rows + "</div>" if meta_rows else ""}
 </div>"""
 
     # ── INCIDENTS ──
@@ -4488,15 +4532,20 @@ async def _gerar_partida_html(dados: dict) -> str:
 
     stats_rows = ""
     if sh or sa:
-        stats_rows += stat_row("Posse de Bola",    _bz_sv(sh,"ball_possession"),           _bz_sv(sa,"ball_possession"),           pct=True)
-        stats_rows += stat_row("xG",               _bz_sv(sh,"xg","expected_goals"),        _bz_sv(sa,"xg","expected_goals"),        fmt=".2f")
-        stats_rows += stat_row("Finalizações",      _bz_sv(sh,"total_shots"),                _bz_sv(sa,"total_shots"))
-        stats_rows += stat_row("No Alvo",           _bz_sv(sh,"shots_on_target"),            _bz_sv(sa,"shots_on_target"))
-        stats_rows += stat_row("Dentro da Área",    _bz_sv(sh,"shots_inside_box"),           _bz_sv(sa,"shots_inside_box"))
-        stats_rows += stat_row("Precisão de Passe", _bz_sv(sh,"pass_accuracy_pct"),          _bz_sv(sa,"pass_accuracy_pct"),          pct=True)
-        stats_rows += stat_row("Escanteios",        _bz_sv(sh,"corner_kicks"),               _bz_sv(sa,"corner_kicks"))
-        stats_rows += stat_row("Faltas",            _bz_sv(sh,"fouls"),                      _bz_sv(sa,"fouls"))
-        stats_rows += stat_row("Cart. Amarelos",    _bz_sv(sh,"yellow_cards"),               _bz_sv(sa,"yellow_cards"))
+        stats_rows += stat_row("Posse de Bola",    _bz_sv(sh,"ball_possession"),               _bz_sv(sa,"ball_possession"),               pct=True)
+        stats_rows += stat_row("xG",               _bz_sv(sh,"xg","expected_goals"),            _bz_sv(sa,"xg","expected_goals"),            fmt=".2f")
+        stats_rows += stat_row("Finalizações",      _bz_sv(sh,"total_shots"),                    _bz_sv(sa,"total_shots"))
+        stats_rows += stat_row("No Alvo",           _bz_sv(sh,"shots_on_target"),                _bz_sv(sa,"shots_on_target"))
+        stats_rows += stat_row("Fora do Alvo",      _bz_sv(sh,"shots_off_target"),               _bz_sv(sa,"shots_off_target"))
+        stats_rows += stat_row("Bloqueados",        _bz_sv(sh,"blocked_shots"),                  _bz_sv(sa,"blocked_shots"))
+        stats_rows += stat_row("Dentro da Área",    _bz_sv(sh,"shots_inside_box"),               _bz_sv(sa,"shots_inside_box"))
+        stats_rows += stat_row("Passes Totais",     _bz_sv(sh,"total_passes"),                   _bz_sv(sa,"total_passes"))
+        stats_rows += stat_row("Precisão de Passe", _bz_sv(sh,"pass_accuracy_pct"),              _bz_sv(sa,"pass_accuracy_pct"),              pct=True)
+        stats_rows += stat_row("Escanteios",        _bz_sv(sh,"corner_kicks"),                   _bz_sv(sa,"corner_kicks"))
+        stats_rows += stat_row("Impedimentos",      _bz_sv(sh,"offsides"),                       _bz_sv(sa,"offsides"))
+        stats_rows += stat_row("Faltas",            _bz_sv(sh,"fouls"),                          _bz_sv(sa,"fouls"))
+        stats_rows += stat_row("Cart. Amarelos",    _bz_sv(sh,"yellow_cards"),                   _bz_sv(sa,"yellow_cards"))
+        stats_rows += stat_row("Cart. Vermelhos",   _bz_sv(sh,"red_cards"),                      _bz_sv(sa,"red_cards"))
         stats_rows += stat_row("Defesas",           _bz_sv(sh,"goalkeeper_saves","total_saves"), _bz_sv(sa,"goalkeeper_saves","total_saves"))
 
     html_stats = (f'<div class="section"><div class="sec-title">📊 Estatísticas</div>'
@@ -4549,7 +4598,10 @@ body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;mi
 .score-big{font-size:60px;font-weight:800;color:#fff;letter-spacing:4px}
 .ht-txt{font-size:13px;color:#8892a4;margin-top:4px}
 .badge{display:inline-block;padding:4px 16px;border-radius:14px;font-size:12px;font-weight:700;color:#fff;margin-top:10px}
-.venue-row{font-size:13px;color:#8892a4;margin-top:14px}
+.goal-scorers{font-size:11px;color:#93c5fd;margin-top:6px;text-align:center;line-height:1.5;max-width:180px}
+.pen-txt{font-size:13px;color:#fbbf24;margin-top:4px}
+.meta-row{display:flex;flex-wrap:wrap;justify-content:center;gap:16px;margin-top:14px}
+.meta-item{font-size:12px;color:#8892a4}
 .section{border-radius:12px;overflow:hidden;margin-top:8px}
 .sec-title{background:#1a2a5e;color:#93c5fd;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:10px 20px}
 .inc-hdr,.inc-row{display:flex;align-items:center;padding:0 16px;background:#16213e}
@@ -4601,7 +4653,7 @@ body{background:#0d1b2a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;mi
 
 
 def _buscar_partidas_passadas(nome_time: str, dias: int = 90) -> tuple[list[dict], str] | None:
-    """Retorna (events, display_name) das últimas 10 partidas encerradas de um time."""
+    """Retorna (events, display_name) das últimas partidas encerradas de um time em todas as ligas."""
     team_map = _bz_build_team_map()
     busca    = nome_time.lower().strip()
     result   = team_map.get(busca)
@@ -4615,44 +4667,81 @@ def _buscar_partidas_passadas(nome_time: str, dias: int = 90) -> tuple[list[dict
         result = best
     if not result:
         return None
-    team_id, display_name = result
-    hoje = datetime.now(tz=BRT).date()
-    # Endpoint team-specific: cobre todas as competições (não só Brasileirao/Copa)
-    data = _bzzoiro_get(f"teams/{team_id}/fixtures/", {
-        "date_from": str(hoje - timedelta(days=dias)),
-        "date_to":   str(hoje),
-        "limit": 30,
-    })
-    events = [
-        ev for ev in (data or {}).get("results", [])
-        if ev.get("status") == "finished"
+    _, display_name = result
+
+    hoje        = datetime.now(tz=BRT).date()
+    amanha      = hoje + timedelta(days=1)
+    date_from   = str(hoje - timedelta(days=dias))
+    busca_norm  = _strip_accents(busca)
+
+    def _match_team(ev: dict) -> bool:
+        for key in ("home_team", "away_team"):
+            n = _strip_accents((ev.get(key) or "").lower())
+            if busca_norm in n or n in busca_norm:
+                return True
+        return False
+
+    todos: list[dict] = []
+    vistos: set       = set()
+    leagues = [
+        (_BZ_BRASILEIRAO_LEAGUE, {}),
+        (_BZ_COPA_LEAGUE,        {"season_id": _BZ_COPA_SEASON}),
+        (_BZ_LIBERTADORES_LEAGUE, {}),
+        (_BZ_SULAMERICANA_LEAGUE, {}),
     ]
-    events.sort(key=lambda e: e.get("event_date", ""), reverse=True)
-    return (events[:10], display_name) if events else None
+    for league_id, extra in leagues:
+        params = {"league_id": league_id, "date_from": date_from,
+                  "date_to": str(amanha), "limit": 100}
+        params.update(extra)
+        data = _bzzoiro_get("events/", params)
+        for ev in (data or {}).get("results", []):
+            eid = ev.get("id")
+            if not eid or eid in vistos:
+                continue
+            if ev.get("status") == "finished" and _match_team(ev):
+                todos.append(ev)
+                vistos.add(eid)
+
+    if not todos:
+        return None
+    todos.sort(key=lambda e: e.get("event_date", ""), reverse=True)
+    return (todos[:10], display_name)
+
+
+_BZ_LIGA_EMOJI = {
+    9:  "🇧🇷",   # Brasileirão
+    35: "🏆",    # Copa do Brasil
+    32: "🌎",    # Libertadores
+    33: "🌎",    # Sul-Americana
+}
 
 
 def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
     """Constrói SelectOptions para histórico: label=times, description=data+placar."""
     opts: list[discord.SelectOption] = []
-    _emoji = {9: "🇧🇷", 35: "🏆"}
     for ev in events:
         eid = ev.get("id")
         if not eid:
             continue
         home    = ev.get("home_team", "?")
         away    = ev.get("away_team", "?")
-        emoji   = _emoji.get(ev.get("league_id", 0), "⚽")
+        liga_id = ev.get("league_id", 0)
+        emoji   = _BZ_LIGA_EMOJI.get(liga_id, "⚽")
+        liga_nome = _BZ_LEAGUE_NAMES.get(liga_id, "")
         h_score = ev.get("home_score", "")
         a_score = ev.get("away_score", "")
         placar  = f"{h_score}-{a_score}" if h_score != "" and a_score != "" else "? - ?"
+        pen     = ev.get("penalty_shootout") or {}
+        if pen.get("home") is not None:
+            placar += f" (pen {pen['home']}-{pen['away']})"
         try:
-            dt      = datetime.fromisoformat(ev.get("event_date", "").replace("Z", "+00:00")).astimezone(BRT)
+            dt       = datetime.fromisoformat(ev.get("event_date", "").replace("Z", "+00:00")).astimezone(BRT)
             data_str = dt.strftime("%d/%m/%Y")
         except Exception:
             data_str = ""
         label = f"{emoji} {home} × {away}"[:100]
-        desc  = f"{data_str} · {placar}" if data_str else placar
-        opts.append(discord.SelectOption(label=label, value=str(eid), description=desc[:100]))
+        desc_parts = [p for p in [data_str, liga_nome, placar] if p]
+        opts.append(discord.SelectOption(label=label, value=str(eid), description=" · ".join(desc_parts)[:100]))
     return opts[:25]
 
 
