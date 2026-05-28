@@ -1,8 +1,10 @@
 import os
 import re
+import json
 import base64
 import asyncio
 import secrets
+import xml.etree.ElementTree as _ET
 import discord
 from discord.ext import commands, tasks
 import requests
@@ -2820,6 +2822,8 @@ class FootballBot(commands.Bot):
         await _iniciar_servidor_web()
         checar_jogos_ao_vivo.start()
         atualizar_players.start()
+        verificar_noticias_times.start()
+        verificar_jogos_times.start()
         if CANAL_RESUMO_ID:
             resumo_diario.start()
         else:
@@ -2839,6 +2843,99 @@ async def on_ready():
         print(f"Slash commands sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Erro ao sincronizar slash commands: {e}")
+
+
+# ==========================================
+# SEGUIR TIME — persistência
+# ==========================================
+
+_SEGUINDO_PATH = os.path.join(os.path.dirname(__file__), "seguindo.json")
+
+
+def _carregar_seguindo() -> dict:
+    try:
+        with open(_SEGUINDO_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _salvar_seguindo(data: dict) -> None:
+    with open(_SEGUINDO_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+_SEGUINDO: dict = _carregar_seguindo()
+# event_id → {home, away, slug, user_ids: set, eventos: set, encerrado: bool, notif_inicio: bool}
+_JOGOS_TIMES: dict = {}
+
+
+def _time_match(query: str, nome: str) -> bool:
+    """True se query corresponde ao nome do time (sem acentos, case-insensitive)."""
+    q = _strip_accents(query.lower())
+    n = _strip_accents(nome.lower())
+    return q in n or n in q
+
+
+def _buscar_jogos_ao_vivo_todos() -> list[dict]:
+    """Varre todas as ligas ESPN + Copa do Brasil e retorna todos os jogos de hoje."""
+    resultado: list[dict] = []
+    vistos: set[str] = set()
+    for slug in set(v for v in LIGAS.values() if v):
+        try:
+            for j in buscar_jogos_do_dia(slug):
+                eid = str(j["fixture"]["id"])
+                if eid not in vistos:
+                    vistos.add(eid)
+                    resultado.append({
+                        "event_id": eid,
+                        "home":  j["teams"]["home"]["name"],
+                        "away":  j["teams"]["away"]["name"],
+                        "slug":  slug,
+                        "state": j["fixture"]["status"]["short"],
+                        "date":  j["fixture"]["date"],
+                    })
+        except Exception:
+            pass
+    try:
+        for j in buscar_jogos_copa_hoje():
+            eid = str(j["fixture"]["id"])
+            if eid not in vistos:
+                vistos.add(eid)
+                resultado.append({
+                    "event_id": eid,
+                    "home":  j["teams"]["home"]["name"],
+                    "away":  j["teams"]["away"]["name"],
+                    "slug":  None,
+                    "state": j["fixture"]["status"]["short"],
+                    "date":  j["fixture"]["date"],
+                })
+    except Exception:
+        pass
+    return resultado
+
+
+async def _buscar_noticias_time(time: str) -> list[dict]:
+    """Busca notícias recentes do Google News RSS para o time."""
+    query = url_quote(f'"{time}" futebol')
+    url   = f"https://news.google.com/rss/search?q={query}&hl=pt-BR&gl=BR&ceid=BR:pt"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return []
+                xml_text = await r.text()
+        root  = _ET.fromstring(xml_text)
+        items = []
+        for item in root.findall(".//item")[:5]:
+            title = item.findtext("title") or ""
+            link  = item.findtext("link") or ""
+            if title and link:
+                items.append({"title": title, "link": link})
+        return items
+    except Exception as e:
+        print(f"[Noticias] {time}: {e}")
+        return []
 
 
 # ==========================================
@@ -2997,6 +3094,182 @@ async def resumo_diario():
         file=discord.File(img),
     )
     print(f"[Resumo] Enviado: {total} jogos em {len(jogos_por_liga)} ligas.")
+
+
+# ==========================================
+# SEGUIR TIME — tasks
+# ==========================================
+
+@tasks.loop(minutes=30)
+async def verificar_noticias_times():
+    """A cada 30 min verifica novidades para os times seguidos e envia DM."""
+    if not _SEGUINDO:
+        return
+    for uid_str, dados in list(_SEGUINDO.items()):
+        times  = dados.get("times", [])
+        vistas = dados.get("noticias_vistas", {})
+        salvar = False
+        for time in times:
+            try:
+                noticias    = await _buscar_noticias_time(time)
+                urls_vistas = set(vistas.get(time, []))
+                novas       = [n for n in noticias if n["link"] not in urls_vistas]
+                if not novas:
+                    continue
+                user = await bot.fetch_user(int(uid_str))
+                for n in novas[:3]:
+                    await user.send(f"📰 **{time}**\n**{n['title']}**\n{n['link']}")
+                    urls_vistas.add(n["link"])
+                vistas[time] = list(urls_vistas)[-100:]
+                salvar = True
+            except Exception as e:
+                print(f"[Noticias] {uid_str}/{time}: {e}")
+        if salvar:
+            dados["noticias_vistas"] = vistas
+    _salvar_seguindo(_SEGUINDO)
+
+
+@tasks.loop(minutes=2)
+async def verificar_jogos_times():
+    """A cada 2 min detecta jogos ao vivo de times seguidos e envia eventos via DM."""
+    if not _SEGUINDO:
+        return
+
+    # Mapa: token_normalizado → set[user_id]
+    times_map: dict[str, set[int]] = {}
+    for uid_str, dados in _SEGUINDO.items():
+        for t in dados.get("times", []):
+            tk = _strip_accents(t.lower())
+            times_map.setdefault(tk, set()).add(int(uid_str))
+
+    if not times_map:
+        return
+
+    loop = asyncio.get_event_loop()
+    jogos = await loop.run_in_executor(None, _buscar_jogos_ao_vivo_todos)
+
+    for j in jogos:
+        eid   = j["event_id"]
+        home  = j["home"]
+        away  = j["away"]
+        state = j["state"]
+
+        interessados: set[int] = set()
+        for tk, uids in times_map.items():
+            if _time_match(tk, home) or _time_match(tk, away):
+                interessados |= uids
+
+        if not interessados:
+            continue
+
+        if eid not in _JOGOS_TIMES:
+            _JOGOS_TIMES[eid] = {
+                "home": home, "away": away,
+                "slug": j["slug"],
+                "user_ids": interessados,
+                "eventos": set(),
+                "encerrado": False,
+                "notif_inicio": False,
+            }
+        else:
+            _JOGOS_TIMES[eid]["user_ids"] |= interessados
+
+        jd = _JOGOS_TIMES[eid]
+
+        # Notificação de início
+        if state not in ("NS", "FT", "AET", "PEN") and not jd["notif_inicio"]:
+            jd["notif_inicio"] = True
+            for uid in interessados:
+                try:
+                    user = await bot.fetch_user(uid)
+                    await user.send(
+                        f"⚽ **Jogo ao vivo!**\n"
+                        f"**{home} × {away}** está em andamento!"
+                    )
+                except Exception:
+                    pass
+
+    # Monitorar eventos dos jogos em andamento
+    for eid, jd in list(_JOGOS_TIMES.items()):
+        if jd.get("encerrado"):
+            del _JOGOS_TIMES[eid]
+            continue
+        slug = jd.get("slug")
+        if not slug:
+            continue
+        try:
+            sumario = await loop.run_in_executor(None, buscar_partida_espn, slug, eid)
+            if not sumario:
+                continue
+
+            header   = sumario.get("header", {})
+            comp     = (header.get("competitions") or [{}])[0]
+            status_t = (comp.get("status") or {}).get("type") or {}
+            state    = status_t.get("state", "pre")
+            competitors = comp.get("competitors") or []
+            home_c   = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away_c   = next((c for c in competitors if c.get("homeAway") == "away"), {})
+            g_casa   = _safe_score(home_c)
+            g_fora   = _safe_score(away_c)
+            nome_h   = (home_c.get("team") or {}).get("displayName", jd["home"])
+            nome_a   = (away_c.get("team") or {}).get("displayName", jd["away"])
+
+            for ev in sumario.get("keyEvents", []):
+                ev_id = str(ev.get("id", ""))
+                if not ev_id or ev_id in jd["eventos"]:
+                    continue
+                jd["eventos"].add(ev_id)
+
+                tipo   = (ev.get("type") or {}).get("text", "")
+                clock  = (ev.get("clock") or {}).get("displayValue", "")
+                try:
+                    minuto = int(clock.split(":")[0])
+                except Exception:
+                    minuto = "?"
+
+                time_ev = (ev.get("team") or {}).get("displayName", "")
+                parts   = ev.get("participants", [])
+                scorer  = next(
+                    (p for p in parts if "scorer" in (p.get("type") or {}).get("text", "").lower()),
+                    parts[0] if parts else {}
+                )
+                jogador = (scorer.get("athlete") or {}).get("displayName", "?")
+
+                tipo_lower = tipo.lower()
+                if "goal" in tipo_lower:
+                    contra = "own" in tipo_lower
+                    emoji  = "❌" if contra else "⚽"
+                    msg = (
+                        f"{emoji} **GOL!** `{minuto}'` — **{jogador}**"
+                        f"{' (contra)' if contra else f' ({time_ev})'}\n"
+                        f"📊 **{nome_h} {g_casa} × {g_fora} {nome_a}**"
+                    )
+                elif "yellow" in tipo_lower:
+                    msg = f"🟨 Cartão Amarelo `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
+                elif "red" in tipo_lower:
+                    msg = f"🟥 Cartão Vermelho `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
+                else:
+                    continue
+
+                for uid in jd["user_ids"]:
+                    try:
+                        user = await bot.fetch_user(uid)
+                        await user.send(msg)
+                    except Exception:
+                        pass
+
+            if state == "post" and not jd.get("encerrado"):
+                msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {g_casa} × {g_fora} {nome_a}**"
+                for uid in jd["user_ids"]:
+                    try:
+                        user = await bot.fetch_user(uid)
+                        await user.send(msg_fim)
+                    except Exception:
+                        pass
+                jd["encerrado"] = True
+
+        except Exception as e:
+            print(f"[JogosTimes] {eid}: {e}")
 
 
 # ==========================================
@@ -3270,6 +3543,60 @@ def _botao_player_visivel(jogo: dict) -> bool:
         return (dt_jogo - agora).total_seconds() <= 300
     except Exception:
         return False
+
+
+class SeguindoView(discord.ui.View):
+    """Lista de times seguidos com opção de deixar de seguir."""
+
+    def __init__(self, uid: int, times: list[str]):
+        super().__init__(timeout=120)
+        self.uid   = uid
+        self.times = list(times)
+
+        opts = [discord.SelectOption(label=t, value=t) for t in times[:25]]
+        self.sel = discord.ui.Select(
+            placeholder="Selecione um time para deixar de seguir...",
+            options=opts, row=0,
+        )
+        self.sel.callback = self._on_select
+        self.add_item(self.sel)
+
+        self.btn_deixar = discord.ui.Button(
+            label="❌ Deixar de seguir", style=discord.ButtonStyle.danger,
+            disabled=True, row=1,
+        )
+        self.btn_deixar.callback = self._on_deixar
+        self.add_item(self.btn_deixar)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("Este menu não é seu.", ephemeral=True)
+            return
+        self._selected = self.sel.values[0]
+        self.btn_deixar.disabled = False
+        await interaction.response.edit_message(view=self)
+
+    async def _on_deixar(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("Este menu não é seu.", ephemeral=True)
+            return
+        time_sel = getattr(self, "_selected", None)
+        if not time_sel:
+            await interaction.response.send_message("Selecione um time primeiro.", ephemeral=True)
+            return
+        uid_str = str(self.uid)
+        if uid_str in _SEGUINDO:
+            times_list = _SEGUINDO[uid_str].get("times", [])
+            match = next((t for t in times_list
+                          if _strip_accents(t.lower()) == _strip_accents(time_sel.lower())), None)
+            if match:
+                times_list.remove(match)
+                _salvar_seguindo(_SEGUINDO)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Você deixou de seguir **{time_sel}**.", view=None,
+        )
 
 
 class SeguirView(discord.ui.View):
@@ -3595,48 +3922,93 @@ async def cmd_calendario(ctx, data_str: str = None):
 
 
 @bot.command(name="seguir")
-async def cmd_seguir(ctx, nome_liga: str, event_id: str):
-    chave = nome_liga.lower().replace(" ", "")
-    if chave not in LIGAS:
-        await ctx.send(f"❌ Liga inválida. Opções: `{'`, `'.join(LIGAS)}`")
+async def cmd_seguir(ctx, *, time: str = ""):
+    """Segue um time: recebe notícias e alertas de jogos ao vivo no privado."""
+    if not time:
+        await ctx.send(
+            "**Uso:** `!seguir <nome do time>`\n"
+            "Ex: `!seguir Flamengo` ou `!seguir Atlético Mineiro`\n"
+            "Você receberá notícias e alertas de gols no privado."
+        )
         return
-    if event_id in JOGOS_MONITORADOS:
-        await ctx.send("📌 Este jogo já está sendo monitorado aqui.")
+    time = time.strip()
+    uid_str = str(ctx.author.id)
+    if uid_str not in _SEGUINDO:
+        _SEGUINDO[uid_str] = {"times": [], "noticias_vistas": {}}
+    dados = _SEGUINDO[uid_str]
+
+    if any(_strip_accents(t.lower()) == _strip_accents(time.lower())
+           for t in dados.get("times", [])):
+        await ctx.send(f"📌 Você já segue **{time}**. Use `!seguindo` para ver sua lista.")
         return
 
-    slug = LIGAS[chave]
-    sumario = buscar_partida_espn(slug, event_id)
-    if not sumario:
-        await ctx.send("❌ ID inválido ou jogo não encontrado. Verifique o ID na imagem do `!liga`.")
+    dados.setdefault("times", []).append(time)
+    _salvar_seguindo(_SEGUINDO)
+
+    try:
+        await ctx.author.send(
+            f"⭐ **Você está seguindo {time}!**\n"
+            f"Você receberá aqui:\n"
+            f"• 📰 Notícias e novidades\n"
+            f"• ⚽ Alertas quando o jogo começar\n"
+            f"• 🥅 Gols e eventos importantes\n"
+            f"• 🏁 Resultado final\n\n"
+            f"Use `!deixar {time}` para parar de seguir."
+        )
+        if ctx.guild:
+            await ctx.message.delete()
+            await ctx.send(
+                f"✅ Seguindo **{time}**! Confirmação enviada no privado.", delete_after=8
+            )
+    except discord.Forbidden:
+        await ctx.send(
+            f"✅ Seguindo **{time}**!\n"
+            f"⚠️ Não foi possível enviar DM. Ative mensagens diretas deste servidor "
+            f"em Configurações > Privacidade."
+        )
+
+
+@bot.command(name="deixar")
+async def cmd_deixar(ctx, *, time: str = ""):
+    """Para de seguir um time."""
+    if not time:
+        await ctx.send("**Uso:** `!deixar <nome do time>`\nEx: `!deixar Flamengo`")
         return
-
-    header = sumario.get("header", {})
-    comp = (header.get("competitions") or [{}])[0]
-    competitors = comp.get("competitors") or []
-    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
-    nome_casa = (home.get("team") or {}).get("displayName", "?")
-    nome_fora = (away.get("team") or {}).get("displayName", "?")
-
-    # Registra eventos já existentes para não re-notificar
-    eventos_existentes = {
-        str(ev.get("id", ""))
-        for ev in sumario.get("keyEvents", [])
-        if ev.get("id")
-    }
-
-    JOGOS_MONITORADOS[event_id] = {
-        "canal_id": ctx.channel.id,
-        "slug": slug,
-        "eventos": eventos_existentes,
-        "encerrado": False,
-    }
-
-    await ctx.send(
-        f"✅ **Monitoramento ativado!**\n"
-        f"⚽ **{nome_casa}** × **{nome_fora}**\n"
-        f"*Vou avisar aqui quando sair gol, cartão ou o jogo terminar.*"
+    time    = time.strip()
+    uid_str = str(ctx.author.id)
+    dados   = _SEGUINDO.get(uid_str, {})
+    times   = dados.get("times", [])
+    match   = next(
+        (t for t in times if _strip_accents(t.lower()) == _strip_accents(time.lower())),
+        None,
     )
+    if not match:
+        await ctx.send(f"❌ Você não está seguindo **{time}**. Use `!seguindo` para ver sua lista.")
+        return
+    times.remove(match)
+    _salvar_seguindo(_SEGUINDO)
+    await ctx.send(f"✅ Você deixou de seguir **{match}**.")
+
+
+@bot.command(name="seguindo")
+async def cmd_seguindo(ctx):
+    """Lista os times que você está seguindo."""
+    uid_str = str(ctx.author.id)
+    times   = _SEGUINDO.get(uid_str, {}).get("times", [])
+    if not times:
+        await ctx.send(
+            "📭 Você não segue nenhum time ainda.\n"
+            "Use `!seguir <time>` para começar. Ex: `!seguir Flamengo`"
+        )
+        return
+    lista  = "\n".join(f"• {t}" for t in times)
+    embed  = discord.Embed(
+        title="⭐ Times que você segue",
+        description=lista,
+        color=0x22C55E,
+    )
+    embed.set_footer(text=f"{len(times)} time(s) · !deixar <time> para parar · notificações chegam no privado")
+    await ctx.send(embed=embed, view=SeguindoView(ctx.author.id, times))
 
 
 @bot.command(name="parar")
@@ -3902,10 +4274,18 @@ def _build_ajuda_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="🔔  Monitoramento ao Vivo",
+        name="🔔  Seguir Times (DM privada)",
         value=(
-            "`!monitorando` — Jogos sendo monitorados\n"
-            "`!seguir [id]` — Monitorar jogo ao vivo (updates automáticos)\n"
+            "`!seguir <time>` — Seguir um time (notícias + alertas de jogos no privado)\n"
+            "`!deixar <time>` — Parar de seguir\n"
+            "`!seguindo` — Ver lista de times seguidos"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📡  Monitoramento ao Vivo (canal)",
+        value=(
+            "`!monitorando` — Jogos sendo monitorados neste canal\n"
             "`!parar [id]` — Parar monitoramento de um jogo"
         ),
         inline=False,
