@@ -310,14 +310,14 @@ def _iptv_buscar_canal(nome: str) -> dict | None:
 
     candidatos = []
 
-    # 1) nome exato
+    # 1) nome exato (comparando sem acentos)
     for c in canais:
-        if c["name"].lower() == busca:
+        if _strip_accents(c["name"]).lower() == busca:
             candidatos.append(c)
     # 2) busca contém o nome — mas "espn" NÃO pode match "espn 2" (verificação de dígito)
     if not candidatos:
         for c in canais:
-            n = c["name"].lower()
+            n = _strip_accents(c["name"]).lower()
             if busca in n:
                 idx   = n.index(busca)
                 resto = n[idx + len(busca):].lstrip()
@@ -330,13 +330,30 @@ def _iptv_buscar_canal(nome: str) -> dict | None:
         palavras = [p for p in busca.split() if len(p) > 2]
         melhor, score = None, 0
         for c in canais:
-            n = c["name"].lower()
+            n = _strip_accents(c["name"]).lower()
             s = sum(1 for p in palavras if p in n)
             if s > score:
                 score, melhor = s, c
         return melhor if score > 0 else None
 
     # Ordena candidatos: prefer FHD, depois HD, depois sem sufixo, depois SD
+    candidatos.sort(key=lambda c: _qualidade(c["name"]), reverse=True)
+    return candidatos[0]
+
+
+def _iptv_buscar_jogo(nome_casa: str, nome_fora: str) -> dict | None:
+    """Busca canal IPTV específico para a partida (ex: 'ATLÉTICO-MG x PUERTO CABELLO - COPA ...')."""
+    canais  = _iptv_canais()
+    # Usa primeiro token de cada time (suficiente para match)
+    token_h = _strip_accents(nome_casa.upper().split()[0])
+    token_a = _strip_accents(nome_fora.upper().split()[0])
+    candidatos = []
+    for c in canais:
+        n = _strip_accents(c["name"]).upper()
+        if token_h in n and token_a in n:
+            candidatos.append(c)
+    if not candidatos:
+        return None
     candidatos.sort(key=lambda c: _qualidade(c["name"]), reverse=True)
     return candidatos[0]
 
@@ -971,9 +988,14 @@ def buscar_tabela(slug: str) -> dict | None:
         return None
 
 
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
 def _normalizar_canal(nome: str) -> str:
-    """Normaliza nomes de canais: ESPN2→ESPN 2, ESPN3→ESPN 3, etc."""
-    return re.sub(r'(?i)^(ESPN|SPORTV|SPORTTV)(\d)$', r'\1 \2', nome.strip())
+    """Normaliza nomes de canais: remove acentos, ESPN2→ESPN 2, etc."""
+    nome = _strip_accents(nome.strip())
+    return re.sub(r'(?i)^(ESPN|SPORTV|SPORTTV)(\d)$', r'\1 \2', nome)
 
 
 def _extrair_meta(comp: dict) -> dict:
@@ -1005,12 +1027,15 @@ def _extrair_meta(comp: dict) -> dict:
 # ==========================================
 
 _TV_POR_LIGA: dict[str, list[str]] = {
-    "BRA.1":                    ["Globo", "SporTV", "SporTV 2", "SporTV 3", "Premiere", "Cazé TV"],
+    "BRA.1":                    ["Globo", "SporTV", "SporTV 2", "SporTV 3", "Premiere", "Caze"],
+    "BRA.2":                    ["SporTV", "SporTV 2", "SporTV 3", "Premiere", "ESPN", "Band"],
+    "BRA.3":                    ["DAZN"],
+    "BRA.CUP":                  ["Amazon", "SporTV", "SporTV 2", "Globo"],
     "CONMEBOL.LIBERTADORES":    ["ESPN", "ESPN 2", "ESPN 3", "Disney+", "SBT"],
     "CONMEBOL.SUDAMERICANA":    ["ESPN", "ESPN 2", "ESPN 3", "Disney+"],
-    "UEFA.CHAMPIONS":           ["TNT", "MAX", "SBT"],
-    "UEFA.EUROPA":              ["TNT", "MAX"],
-    "UEFA.EUROPA.CONFERENCE":   ["TNT", "MAX"],
+    "UEFA.CHAMPIONS":           ["TNT", "HBO Max", "SBT"],
+    "UEFA.EUROPA":              ["TNT", "HBO Max"],
+    "UEFA.EUROPA.CONFERENCE":   ["TNT", "HBO Max"],
     "eng.1":                    ["ESPN", "ESPN 2", "ESPN 3", "Disney+", "Star+"],
     "ESP.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+"],
     "ITA.1":                    ["ESPN", "ESPN 2", "Disney+", "Star+"],
@@ -3346,19 +3371,22 @@ class SeguirView(discord.ui.View):
         broadcasts_all = _canais_tv(jogo, slug)
         loop = asyncio.get_event_loop()
 
-        candidatos: list[str] = []
-        for c in broadcasts_api + broadcasts_all:
-            if c not in candidatos:
-                candidatos.append(c)
-        for fb in ["ESPN FHD", "ESPN"]:
-            if fb not in candidatos:
-                candidatos.append(fb)
+        # Prioridade 1: canal IPTV específico para a partida
+        canal_iptv = await loop.run_in_executor(None, _iptv_buscar_jogo, nome_casa, nome_fora)
 
-        canal_iptv = None
-        for nome in candidatos:
-            canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
-            if canal_iptv:
-                break
+        # Prioridade 2: canais por nome (ESPN API + mapeamento fixo + fallback)
+        if not canal_iptv:
+            candidatos: list[str] = []
+            for c in broadcasts_api + broadcasts_all:
+                if c not in candidatos:
+                    candidatos.append(c)
+            for fb in ["ESPN FHD", "ESPN"]:
+                if fb not in candidatos:
+                    candidatos.append(fb)
+            for nome in candidatos:
+                canal_iptv = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
+                if canal_iptv:
+                    break
 
         if canal_iptv:
             title      = f"{nome_casa} × {nome_fora}"
