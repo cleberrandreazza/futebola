@@ -3945,6 +3945,7 @@ async def cmd_seguir(ctx, *, time: str = ""):
     dados.setdefault("times", []).append(time)
     _salvar_seguindo(_SEGUINDO)
 
+    dm_ok = False
     try:
         await ctx.author.send(
             f"⭐ **Você está seguindo {time}!**\n"
@@ -3955,17 +3956,23 @@ async def cmd_seguir(ctx, *, time: str = ""):
             f"• 🏁 Resultado final\n\n"
             f"Use `!deixar {time}` para parar de seguir."
         )
-        if ctx.guild:
-            await ctx.message.delete()
-            await ctx.send(
-                f"✅ Seguindo **{time}**! Confirmação enviada no privado.", delete_after=8
-            )
+        dm_ok = True
     except discord.Forbidden:
-        await ctx.send(
-            f"✅ Seguindo **{time}**!\n"
-            f"⚠️ Não foi possível enviar DM. Ative mensagens diretas deste servidor "
-            f"em Configurações > Privacidade."
-        )
+        pass
+
+    if ctx.guild:
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        if dm_ok:
+            await ctx.send(f"✅ Seguindo **{time}**! Confirmação enviada no privado.", delete_after=8)
+        else:
+            await ctx.send(
+                f"✅ Seguindo **{time}**!\n"
+                f"⚠️ Não foi possível enviar DM. Ative mensagens diretas deste servidor "
+                f"em Configurações > Privacidade."
+            )
 
 
 @bot.command(name="deixar")
