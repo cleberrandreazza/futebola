@@ -3908,6 +3908,108 @@ def _slug_do_jogo(jogo: dict, slug_padrao: str) -> str:
     return jogo.get("_slug") or slug_padrao
 
 
+async def _criar_evento_voz(guild: discord.Guild, jogo: dict, slug_jogo: str) -> tuple[bool, str]:
+    """Cria um evento de voz (CANAL_EVENTO) para o jogo e avisa no chat do canal.
+
+    Retorna (sucesso, mensagem). Assume que a interação já foi reconhecida —
+    o chamador faz o followup com a mensagem retornada.
+    """
+    me = guild.me
+    if not me or not me.guild_permissions.manage_events:
+        return False, "❌ O bot precisa da permissão **Gerenciar Eventos** neste servidor."
+
+    nome_casa = jogo["teams"]["home"]["name"]
+    nome_fora = jogo["teams"]["away"]["name"]
+    titulo    = f"{nome_casa} × {nome_fora}"
+
+    try:
+        start_dt = datetime.fromisoformat(
+            jogo["fixture"]["date"].replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except Exception:
+        return False, "❌ Data do jogo inválida."
+
+    agora = datetime.now(timezone.utc)
+    if start_dt < agora:
+        if jogo["fixture"]["status"]["short"] in ("FT", "AET", "PEN"):
+            return False, "❌ Este jogo já encerrou — não é possível criar evento."
+        start_dt = agora + timedelta(minutes=2)
+
+    slug_key  = next((k for k, v in LIGAS.items() if v == slug_jogo), slug_jogo or "brasileirao")
+    liga_nome = LIGAS_META.get(slug_key, {}).get("nome", slug_jogo or "Futebol")
+    cover_path = None
+
+    try:
+        cover_path = await gerar_evento_cover_png(jogo, liga_nome)
+        with open(cover_path, "rb") as f:
+            cover_bytes = f.read()
+
+        meta       = jogo.get("meta", {})
+        venue      = meta.get("venue", "")
+        broadcasts = _canais_tv(jogo, slug_jogo)
+        tv_line    = ", ".join(broadcasts[:3]) if broadcasts else "A confirmar"
+        descricao  = (
+            f"⚽ {liga_nome}\n"
+            f"🏟️ {venue or 'Estádio a confirmar'}\n"
+            f"📺 {tv_line}\n\n"
+            f"Assista com a galera no servidor!"
+        )[:1000]
+
+        canal_voz = bot.get_channel(CANAL_EVENTO_ID)
+        if canal_voz is None:
+            try:
+                canal_voz = await bot.fetch_channel(CANAL_EVENTO_ID)
+            except Exception:
+                canal_voz = None
+
+        if not isinstance(canal_voz, (discord.VoiceChannel, discord.StageChannel)):
+            return False, f"❌ O canal `{CANAL_EVENTO_ID}` não foi encontrado ou não é um canal de voz."
+
+        evento = await guild.create_scheduled_event(
+            name=titulo[:100],
+            description=descricao,
+            start_time=start_dt,
+            entity_type=discord.EntityType.voice,
+            channel=canal_voz,
+            privacy_level=discord.PrivacyLevel.guild_only,
+            image=cover_bytes,
+        )
+
+        link     = evento.url
+        data_brt = start_dt.astimezone(BRT).strftime("%d/%m/%Y às %H:%M")
+
+        avisou = True
+        try:
+            await canal_voz.send(
+                f"📅 **Evento criado:** {titulo}\n"
+                f"🗓️ {data_brt} (BRT)\n"
+                f"🔊 {canal_voz.mention}\n"
+                f"🔗 {link}"
+            )
+        except Exception as e:
+            avisou = False
+            print(f"[Evento] Falha ao avisar no canal de voz {CANAL_EVENTO_ID}: {e}")
+
+        return True, (
+            f"✅ Evento **{titulo}** criado!\n"
+            f"🗓️ {data_brt} (BRT)\n"
+            f"🔊 {canal_voz.mention}\n"
+            f"🔗 {link}"
+            + ("" if avisou else "\n⚠️ Não foi possível avisar no chat do canal de voz.")
+        )
+    except discord.Forbidden:
+        return False, "❌ Sem permissão para criar eventos neste servidor."
+    except Exception as e:
+        print(f"[CriarEvento] Erro: {e}")
+        return False, f"❌ Erro ao criar evento: `{e}`"
+    finally:
+        if cover_path and os.path.isfile(cover_path):
+            try:
+                os.remove(cover_path)
+            except OSError:
+                pass
+
+
 class SeguirView(discord.ui.View):
     """Select menu com todos os jogos + botões Detalhes / Abrir Player / Criar Evento."""
 
@@ -4066,132 +4168,20 @@ class SeguirView(discord.ui.View):
             await interaction.response.send_message("Use este botão em um servidor.", ephemeral=True)
             return
 
-        me = interaction.guild.me
-        if not me or not me.guild_permissions.manage_events:
-            await interaction.response.send_message(
-                "❌ O bot precisa da permissão **Gerenciar Eventos** neste servidor.",
-                ephemeral=True,
-            )
-            return
-
-        jogo      = self.selected
-        nome_casa = jogo["teams"]["home"]["name"]
-        nome_fora = jogo["teams"]["away"]["name"]
-        titulo    = f"{nome_casa} × {nome_fora}"
-
-        try:
-            start_dt = datetime.fromisoformat(
-                jogo["fixture"]["date"].replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-        except Exception:
-            await interaction.response.send_message("❌ Data do jogo inválida.", ephemeral=True)
-            return
-
-        agora = datetime.now(timezone.utc)
-        if start_dt < agora:
-            if jogo["fixture"]["status"]["short"] in ("FT", "AET", "PEN"):
-                await interaction.response.send_message(
-                    "❌ Este jogo já encerrou — não é possível criar evento.", ephemeral=True,
-                )
-                return
-            start_dt = agora + timedelta(minutes=2)
-
         self.btn_evento.disabled = True
         self.btn_evento.label    = "⏳ Criando..."
         await interaction.response.edit_message(view=self)
 
-        slug_jogo = _slug_do_jogo(jogo, self.slug)
-        slug_key  = next((k for k, v in LIGAS.items() if v == slug_jogo), slug_jogo or "brasileirao")
-        liga_nome = LIGAS_META.get(slug_key, {}).get("nome", slug_jogo or "Futebol")
-        cover_path = None
+        slug_jogo = _slug_do_jogo(self.selected, self.slug)
+        ok, msg   = await _criar_evento_voz(interaction.guild, self.selected, slug_jogo)
 
-        try:
-            cover_path = await gerar_evento_cover_png(jogo, liga_nome)
-            with open(cover_path, "rb") as f:
-                cover_bytes = f.read()
-
-            meta       = jogo.get("meta", {})
-            venue      = meta.get("venue", "")
-            broadcasts = _canais_tv(jogo, slug_jogo)
-            tv_line    = ", ".join(broadcasts[:3]) if broadcasts else "A confirmar"
-            descricao  = (
-                f"⚽ {liga_nome}\n"
-                f"🏟️ {venue or 'Estádio a confirmar'}\n"
-                f"📺 {tv_line}\n\n"
-                f"Assista com a galera no servidor!"
-            )[:1000]
-
-            canal_voz = bot.get_channel(CANAL_EVENTO_ID)
-            if canal_voz is None:
-                try:
-                    canal_voz = await bot.fetch_channel(CANAL_EVENTO_ID)
-                except Exception:
-                    canal_voz = None
-
-            if not isinstance(canal_voz, (discord.VoiceChannel, discord.StageChannel)):
-                self.btn_evento.disabled = False
-                self.btn_evento.label    = "📅 Criar Evento"
-                await interaction.message.edit(view=self)
-                await interaction.followup.send(
-                    f"❌ O canal `{CANAL_EVENTO_ID}` não foi encontrado ou não é um canal de voz.",
-                    ephemeral=True,
-                )
-                return
-
-            evento = await interaction.guild.create_scheduled_event(
-                name=titulo[:100],
-                description=descricao,
-                start_time=start_dt,
-                entity_type=discord.EntityType.voice,
-                channel=canal_voz,
-                privacy_level=discord.PrivacyLevel.guild_only,
-                image=cover_bytes,
-            )
-
-            link = evento.url
-            data_brt = start_dt.astimezone(BRT).strftime("%d/%m/%Y às %H:%M")
-
-            avisou = True
-            try:
-                await canal_voz.send(
-                    f"📅 **Evento criado:** {titulo}\n"
-                    f"🗓️ {data_brt} (BRT)\n"
-                    f"🔊 {canal_voz.mention}\n"
-                    f"🔗 {link}"
-                )
-            except Exception as e:
-                avisou = False
-                print(f"[Evento] Falha ao avisar no canal de voz {CANAL_EVENTO_ID}: {e}")
-
+        if ok:
             self.btn_evento.label = "✅ Evento criado"
-            await interaction.message.edit(view=self)
-            await interaction.followup.send(
-                f"✅ Evento **{titulo}** criado!\n"
-                f"🗓️ {data_brt} (BRT)\n"
-                f"🔊 {canal_voz.mention}\n"
-                f"🔗 {link}"
-                + ("" if avisou else "\n⚠️ Não foi possível avisar no chat do canal de voz."),
-                ephemeral=True,
-            )
-        except discord.Forbidden:
+        else:
             self.btn_evento.disabled = False
             self.btn_evento.label    = "📅 Criar Evento"
-            await interaction.message.edit(view=self)
-            await interaction.followup.send(
-                "❌ Sem permissão para criar eventos neste servidor.", ephemeral=True,
-            )
-        except Exception as e:
-            print(f"[CriarEvento] Erro: {e}")
-            self.btn_evento.disabled = False
-            self.btn_evento.label    = "📅 Criar Evento"
-            await interaction.message.edit(view=self)
-            await interaction.followup.send(f"❌ Erro ao criar evento: `{e}`", ephemeral=True)
-        finally:
-            if cover_path and os.path.isfile(cover_path):
-                try:
-                    os.remove(cover_path)
-                except OSError:
-                    pass
+        await interaction.message.edit(view=self)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 # ==========================================
@@ -4327,7 +4317,7 @@ async def cmd_hoje(ctx):
     if bz_events:
         opcoes = _build_partida_options(bz_events)
         if opcoes:
-            view = PartidaSelectView(opcoes)
+            view = PartidaSelectView(opcoes, permitir_evento=True)
 
     await ctx.send(
         content=f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas",
@@ -5344,22 +5334,36 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
 
 
 class PartidaSelectView(discord.ui.View):
-    def __init__(self, opcoes: list[discord.SelectOption]):
+    def __init__(self, opcoes: list[discord.SelectOption], permitir_evento: bool = False):
         super().__init__(timeout=300)
+        self.permitir_evento = permitir_evento
+        self.selected_jogo: dict | None = None
+        self.selected_slug: str = ""
+
         sel = discord.ui.Select(
             placeholder="🔍 Ver detalhes de uma partida...",
             options=opcoes,
+            row=0,
         )
         sel.callback = self._on_select
         self.add_item(sel)
 
+        if permitir_evento:
+            self.btn_evento = discord.ui.Button(
+                label="📅 Criar Evento", style=discord.ButtonStyle.success,
+                disabled=True, row=1,
+            )
+            self.btn_evento.callback = self._on_criar_evento
+            self.add_item(self.btn_evento)
+
     async def _on_select(self, interaction: discord.Interaction):
         eid   = int(interaction.data["values"][0])
-        await interaction.response.defer()
+        # Loader imediato para o usuário saber que está carregando
+        await interaction.response.send_message("⏳ Carregando dados da partida...")
         loop  = asyncio.get_event_loop()
         dados = await loop.run_in_executor(None, buscar_detalhes_partida, eid)
         if not dados:
-            await interaction.followup.send("❌ Detalhes não disponíveis.", ephemeral=True)
+            await interaction.edit_original_response(content="❌ Detalhes não disponíveis.")
             return
         try:
             html = await _gerar_partida_html(dados)
@@ -5374,13 +5378,50 @@ class PartidaSelectView(discord.ui.View):
             status  = (ev.get("status") or "").lower()
             ao_vivo = status not in ("notstarted", "finished", "")
             if ao_vivo and IPTV_URL:
+                await interaction.edit_original_response(
+                    content=f"⏳ Carregando player de **{titulo}**..."
+                )
                 player_url = await self._gerar_player_url(loop, ev, eid, nome_casa, nome_fora)
                 if player_url:
                     partes.append(f"📺 **Player ao vivo:** {player_url}")
 
-            await interaction.followup.send("\n".join(partes))
+            # Habilita o botão de criar evento para a partida selecionada
+            if self.permitir_evento and status != "finished":
+                logo_map = await loop.run_in_executor(None, _buscar_logos_brasileiros)
+                self.selected_jogo = _bzzoiro_ev_to_fixture(ev, logo_map)
+                self.selected_slug = self.selected_jogo.get("_slug", "")
+                self.btn_evento.disabled = False
+                self.btn_evento.label    = "📅 Criar Evento"
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
+
+            await interaction.edit_original_response(content="\n".join(partes))
         except Exception as e:
-            await interaction.followup.send(f"Erro: {e}", ephemeral=True)
+            await interaction.edit_original_response(content=f"Erro: {e}")
+
+    async def _on_criar_evento(self, interaction: discord.Interaction):
+        if not self.selected_jogo:
+            await interaction.response.send_message("Selecione uma partida primeiro.", ephemeral=True)
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Use este botão em um servidor.", ephemeral=True)
+            return
+
+        self.btn_evento.disabled = True
+        self.btn_evento.label    = "⏳ Criando..."
+        await interaction.response.edit_message(view=self)
+
+        ok, msg = await _criar_evento_voz(interaction.guild, self.selected_jogo, self.selected_slug)
+
+        if ok:
+            self.btn_evento.label = "✅ Evento criado"
+        else:
+            self.btn_evento.disabled = False
+            self.btn_evento.label    = "📅 Criar Evento"
+        await interaction.message.edit(view=self)
+        await interaction.followup.send(msg, ephemeral=True)
 
     async def _gerar_player_url(self, loop, ev: dict, eid: int,
                                 nome_casa: str, nome_fora: str) -> str | None:
