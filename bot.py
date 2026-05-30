@@ -1151,17 +1151,17 @@ _SELECOES_ALIASES: dict[str, str] = {
 _LIGAS_SELECAO = frozenset({"amistosos", "copadomundo"})
 
 
+# Mapa normalizado (sem acentos/pontuação) → nome ESPN, aceita digitação com ou sem acento
+_SELECOES_NORM: dict[str, str] = {}
+for _k, _v in _SELECOES_ALIASES.items():
+    _SELECOES_NORM[_strip_accents(_k.lower().strip())] = _v
+    _SELECOES_NORM[_strip_accents(_v.lower().strip())] = _v
+
+
 def _canonical_selecao(nome: str) -> str | None:
-    """Nome canônico ESPN se for busca por seleção; senão None."""
-    n = _strip_accents(nome.lower().strip())
-    if n in _SELECOES_ALIASES:
-        return _SELECOES_ALIASES[n]
-    canon_vals = {_strip_accents(v.lower()) for v in _SELECOES_ALIASES.values()}
-    if n in canon_vals:
-        for v in set(_SELECOES_ALIASES.values()):
-            if _strip_accents(v.lower()) == n:
-                return v
-    return None
+    """Nome canônico ESPN se for busca por seleção; aceita com ou sem acento. Senão None."""
+    n = _strip_accents((nome or "").lower().strip())
+    return _SELECOES_NORM.get(n)
 
 
 def buscar_time_id(slug: str, nome_time: str) -> tuple | None:
@@ -1280,28 +1280,42 @@ def _espn_ev_to_fixture_proximo(ev: dict) -> dict:
 
 
 def buscar_proximos_jogos_scoreboard(slug: str, team_id: str, limite: int = 5) -> list:
-    """Próximos jogos via scoreboard (schedule da ESPN costuma incompleto para seleções)."""
-    hoje = datetime.now(tz=BRT).date()
-    ini  = hoje.strftime("%Y%m%d")
-    fim  = (hoje + timedelta(days=400)).strftime("%Y%m%d")
-    data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": f"{ini}-{fim}", "limit": 300})
-    if not data:
-        return []
-    tid  = str(team_id)
+    """Próximos jogos via scoreboard (schedule da ESPN costuma incompleto para seleções).
+
+    A ESPN retorna vazio quando o intervalo `dates` passa de ~1 ano, então
+    consultamos em janelas de 120 dias até juntar jogos suficientes.
+    """
+    tid     = str(team_id)
+    hoje    = datetime.now(tz=BRT).date()
     hoje_dt = datetime.now(tz=BRT)
+    vistos: set[str] = set()
     candidatos: list[tuple[datetime, dict]] = []
-    for ev in data.get("events", []):
-        comp = (ev.get("competitions") or [{}])[0]
-        ids  = {str((c.get("team") or {}).get("id", "")) for c in comp.get("competitors", [])}
-        if tid not in ids:
+
+    for offset in range(0, 360, 120):
+        ini = (hoje + timedelta(days=offset)).strftime("%Y%m%d")
+        fim = (hoje + timedelta(days=offset + 120)).strftime("%Y%m%d")
+        data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": f"{ini}-{fim}", "limit": 300})
+        if not data:
             continue
-        try:
-            dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).astimezone(BRT)
-        except Exception:
-            continue
-        if dt < hoje_dt:
-            continue
-        candidatos.append((dt, _espn_ev_to_fixture_proximo(ev)))
+        for ev in data.get("events", []):
+            comp = (ev.get("competitions") or [{}])[0]
+            ids  = {str((c.get("team") or {}).get("id", "")) for c in comp.get("competitors", [])}
+            if tid not in ids:
+                continue
+            eid = str(ev.get("id", ""))
+            if eid in vistos:
+                continue
+            try:
+                dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).astimezone(BRT)
+            except Exception:
+                continue
+            if dt < hoje_dt:
+                continue
+            vistos.add(eid)
+            candidatos.append((dt, _espn_ev_to_fixture_proximo(ev)))
+        if len(candidatos) >= limite:
+            break
+
     candidatos.sort(key=lambda x: x[0])
     return [f for _, f in candidatos[:limite]]
 
