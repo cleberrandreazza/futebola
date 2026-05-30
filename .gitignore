@@ -1,1 +1,9 @@
 .env
+.env.local
+
+# Node / Convex
+node_modules/
+convex/_generated/
+
+# Estado local (fallback quando Convex não está configurado)
+seguindo.json

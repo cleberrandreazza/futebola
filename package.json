@@ -1,0 +1,13 @@
+{
+  "name": "football-bot-convex",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend Convex para persistir os seguidores do bot de futebol",
+  "scripts": {
+    "convex:dev": "convex dev",
+    "convex:deploy": "convex deploy"
+  },
+  "dependencies": {
+    "convex": "^1.39.1"
+  }
+}

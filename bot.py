@@ -3143,8 +3143,44 @@ async def on_ready():
 
 _SEGUINDO_PATH = os.path.join(os.path.dirname(__file__), "seguindo.json")
 
+# Convex: persistência durável dos seguidores (o disco do Railway é efêmero).
+# Se CONVEX_URL não estiver configurado, cai automaticamente no arquivo local.
+_CONVEX_URL    = os.getenv("CONVEX_URL", "").strip()
+_BOT_SECRET    = os.getenv("BOT_SHARED_SECRET", "").strip()
+_convex_client = None
+if _CONVEX_URL:
+    try:
+        from convex import ConvexClient
+        _convex_client = ConvexClient(_CONVEX_URL)
+        print(f"[Convex] Cliente conectado em {_CONVEX_URL}")
+    except Exception as e:
+        print(f"[Convex] Falha ao inicializar cliente ({e}); usando arquivo local.")
+        _convex_client = None
+else:
+    print("[Convex] CONVEX_URL não definido; seguidores serão salvos em arquivo local.")
+
+
+def _convex_args(extra: dict | None = None) -> dict:
+    args = dict(extra or {})
+    if _BOT_SECRET:
+        args["secret"] = _BOT_SECRET
+    return args
+
 
 def _carregar_seguindo() -> dict:
+    if _convex_client:
+        try:
+            data = _convex_client.query("seguidores:getAll", _convex_args())
+            out: dict = {}
+            for uid, entry in (data or {}).items():
+                out[uid] = {
+                    "times": list(entry.get("times", [])),
+                    "noticias_vistas": dict(entry.get("noticiasVistas", {})),
+                }
+            print(f"[Convex] {len(out)} seguidor(es) carregado(s).")
+            return out
+        except Exception as e:
+            print(f"[Convex] Erro ao carregar ({e}); tentando arquivo local.")
     try:
         with open(_SEGUINDO_PATH, encoding="utf-8") as f:
             return json.load(f)
@@ -3153,6 +3189,19 @@ def _carregar_seguindo() -> dict:
 
 
 def _salvar_seguindo(data: dict) -> None:
+    if _convex_client:
+        try:
+            payload = {
+                uid: {
+                    "times": list(entry.get("times", [])),
+                    "noticiasVistas": dict(entry.get("noticias_vistas", {})),
+                }
+                for uid, entry in data.items()
+            }
+            _convex_client.mutation("seguidores:replaceAll", _convex_args({"dados": payload}))
+            return
+        except Exception as e:
+            print(f"[Convex] Erro ao salvar ({e}); gravando arquivo local.")
     with open(_SEGUINDO_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
