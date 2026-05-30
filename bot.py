@@ -85,6 +85,36 @@ LIGAS = {
 # Ligas exibidas no !hoje e no resumo diário automático
 LIGAS_RESUMO = ["copadomundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
+PROXIMOS_PADRAO = 5
+PROXIMOS_MAX    = 25
+
+
+def _normalizar_limite_proximos(limite: int) -> int:
+    try:
+        n = int(limite)
+    except (TypeError, ValueError):
+        return PROXIMOS_PADRAO
+    return max(1, min(n, PROXIMOS_MAX))
+
+
+def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, str | None, str]:
+    """Ex.: `10 flamengo` → (10, None, 'flamengo'); use `10 brasileirao flamengo` com número primeiro."""
+    qtd   = PROXIMOS_PADRAO
+    parts: list[str] = []
+    if primeiro:
+        parts.append(primeiro.strip())
+    if resto:
+        parts.extend(resto.strip().split())
+    if parts and parts[0].isdigit():
+        qtd   = _normalizar_limite_proximos(int(parts[0]))
+        parts = parts[1:]
+    if not parts:
+        return qtd, None, ""
+    if parts[0].lower() in LIGAS:
+        return qtd, parts[0].lower(), " ".join(parts[1:]).strip()
+    return qtd, None, " ".join(parts).strip()
+
+
 PASTA_LOGOS = "logos"
 os.makedirs(PASTA_LOGOS, exist_ok=True)
 
@@ -1119,34 +1149,6 @@ _SELECOES_ALIASES: dict[str, str] = {
     "usa": "United States",
 }
 _LIGAS_SELECAO = frozenset({"amistosos", "copadomundo"})
-PROXIMOS_PADRAO = 5
-PROXIMOS_MAX    = 25
-
-
-def _normalizar_limite_proximos(limite: int) -> int:
-    try:
-        n = int(limite)
-    except (TypeError, ValueError):
-        return PROXIMOS_PADRAO
-    return max(1, min(n, PROXIMOS_MAX))
-
-
-def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, str | None, str]:
-    """Ex.: `10 flamengo` → (10, None, 'flamengo'); `brasileirao 10 flamengo` inválido ordem — use `10 brasileirao flamengo`."""
-    qtd   = PROXIMOS_PADRAO
-    parts: list[str] = []
-    if primeiro:
-        parts.append(primeiro.strip())
-    if resto:
-        parts.extend(resto.strip().split())
-    if parts and parts[0].isdigit():
-        qtd   = _normalizar_limite_proximos(int(parts[0]))
-        parts = parts[1:]
-    if not parts:
-        return qtd, None, ""
-    if parts[0].lower() in LIGAS:
-        return qtd, parts[0].lower(), " ".join(parts[1:]).strip()
-    return qtd, None, " ".join(parts).strip()
 
 
 def _canonical_selecao(nome: str) -> str | None:
