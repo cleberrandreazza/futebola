@@ -586,6 +586,76 @@ def buscar_jogos_copa_hoje() -> list:
     return [_bzzoiro_ev_to_fixture(ev, logo_map) for ev in data.get("results", [])]
 
 
+# ----- Notificações ao vivo do !seguir (via Bzzoiro) -----
+
+# Status Bzzoiro que NÃO são "ao vivo nem encerrado normalmente"
+_BZ_PARADOS = {"notstarted", "cancelled", "postponed", "abandoned", "awarded", "deleted"}
+
+
+def _bz_eventos_hoje() -> list:
+    """Eventos de hoje em todas as ligas Bzzoiro (lista crua de results)."""
+    hoje = datetime.now(tz=BRT).date()
+    data = _bzzoiro_get("events/", {"date_from": str(hoje), "date_to": str(hoje), "limit": 300})
+    return (data or {}).get("results", [])
+
+
+def _buscar_jogos_ao_vivo_bzzoiro() -> list[dict]:
+    """Jogos ao vivo/encerrados de hoje (todas as ligas) via Bzzoiro,
+    no formato consumido pelo loop de notificações do !seguir."""
+    out: list[dict] = []
+    for ev in _bz_eventos_hoje():
+        if ev.get("status", "") in _BZ_PARADOS:
+            continue
+        short, _ = _bzzoiro_status(ev)
+        out.append({
+            "event_id": str(ev.get("id")),
+            "bz_id":    ev.get("id"),
+            "home":     ev.get("home_team", ""),
+            "away":     ev.get("away_team", ""),
+            "state":    short,
+        })
+    return out
+
+
+def _bz_incident_key(inc: dict) -> str:
+    """Chave estável para deduplicar um incidente Bzzoiro."""
+    return ":".join(str(inc.get(k, "")) for k in (
+        "type", "minute", "player_id", "card_type", "goal_type",
+        "home_score", "away_score",
+    ))
+
+
+def _bz_incident_para_msg(inc: dict, nome_h: str, nome_a: str) -> str | None:
+    """Monta a mensagem de DM para um incidente de gol/cartão. None se irrelevante."""
+    tipo    = inc.get("type")
+    minuto  = inc.get("minute", "?")
+    jogador = inc.get("player") or "?"
+    time_ev = nome_h if inc.get("is_home") else nome_a
+    hs      = inc.get("home_score")
+    as_     = inc.get("away_score")
+    if tipo == "goal":
+        gt     = (inc.get("goal_type") or "").lower()
+        contra = "own" in gt
+        emoji  = "❌" if contra else "⚽"
+        if contra:
+            extra = " (gol contra)"
+        elif "pen" in gt:
+            extra = f" ({time_ev}, pênalti)"
+        else:
+            extra = f" ({time_ev})"
+        assist  = inc.get("assist")
+        ass_txt = f"\n🅰️ Assistência: **{assist}**" if assist and not contra else ""
+        return (f"{emoji} **GOL!** `{minuto}'` — **{jogador}**{extra}{ass_txt}\n"
+                f"📊 **{nome_h} {hs} × {as_} {nome_a}**")
+    if tipo == "card":
+        ct = (inc.get("card_type") or "").lower()
+        if "red" in ct:
+            return f"🟥 Cartão Vermelho `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
+        if "yellow" in ct:
+            return f"🟨 Cartão Amarelo `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
+    return None
+
+
 def _bz_current_season(league_id: int) -> int | None:
     """Retorna o season_id mais recente para uma liga Bzzoiro."""
     data = _bzzoiro_get("seasons/", {"league_id": league_id})
@@ -3492,7 +3562,7 @@ async def verificar_jogos_times():
         return
 
     loop = asyncio.get_event_loop()
-    jogos = await loop.run_in_executor(None, _buscar_jogos_ao_vivo_todos)
+    jogos = await loop.run_in_executor(None, _buscar_jogos_ao_vivo_bzzoiro)
 
     for j in jogos:
         eid   = j["event_id"]
@@ -3519,7 +3589,7 @@ async def verificar_jogos_times():
                 continue
             _JOGOS_TIMES[eid] = {
                 "home": home, "away": away,
-                "slug": j["slug"],
+                "bz_id": j["bz_id"],
                 "user_ids": interessados,
                 "eventos": set(),
                 "encerrado": False,
@@ -3551,71 +3621,45 @@ async def monitorar_eventos_times():
     if not _JOGOS_TIMES:
         return
     loop = asyncio.get_event_loop()
+    # Uma única chamada traz status/placar de todos os jogos de hoje.
+    eventos_hoje = await loop.run_in_executor(None, _bz_eventos_hoje)
+    mapa_ev = {ev.get("id"): ev for ev in eventos_hoje}
+
     for eid, jd in list(_JOGOS_TIMES.items()):
         if eid in _JOGOS_ENCERRADOS or jd.get("encerrado"):
             _JOGOS_TIMES.pop(eid, None)
             continue
-        slug = jd.get("slug")
-        if not slug:
+        bz_id = jd.get("bz_id")
+        if not bz_id:
             continue
         try:
-            sumario = await loop.run_in_executor(None, buscar_partida_espn, slug, eid)
-            if not sumario:
-                continue
+            ev = mapa_ev.get(bz_id)
+            if ev is None:
+                ev = await loop.run_in_executor(None, _bzzoiro_get, f"events/{bz_id}/") or {}
+            status = ev.get("status", "")
+            home_s = ev.get("home_score")
+            away_s = ev.get("away_score")
+            nome_h = ev.get("home_team") or jd["home"]
+            nome_a = ev.get("away_team") or jd["away"]
 
-            header   = sumario.get("header", {})
-            comp     = (header.get("competitions") or [{}])[0]
-            status_t = (comp.get("status") or {}).get("type") or {}
-            state    = status_t.get("state", "pre")
-            competitors = comp.get("competitors") or []
-            home_c   = next((c for c in competitors if c.get("homeAway") == "home"), {})
-            away_c   = next((c for c in competitors if c.get("homeAway") == "away"), {})
-            g_casa   = _safe_score(home_c)
-            g_fora   = _safe_score(away_c)
-            nome_h   = (home_c.get("team") or {}).get("displayName", jd["home"])
-            nome_a   = (away_c.get("team") or {}).get("displayName", jd["away"])
+            inc_data  = await loop.run_in_executor(None, _bzzoiro_get, f"events/{bz_id}/incidents/")
+            incidents = (inc_data or {}).get("incidents", [])
 
             primeira = jd.get("primeira_leitura", False)
-            for ev in sumario.get("keyEvents", []):
-                ev_id = str(ev.get("id", ""))
-                if not ev_id or ev_id in jd["eventos"]:
+            for inc in incidents:
+                if inc.get("type") not in ("goal", "card"):
                     continue
-                jd["eventos"].add(ev_id)
+                key = _bz_incident_key(inc)
+                if key in jd["eventos"]:
+                    continue
+                jd["eventos"].add(key)
                 # Na primeira leitura (jogo já estava em andamento ao ser
-                # detectado), apenas registra os eventos como vistos sem
-                # notificar o histórico todo de uma vez.
+                # detectado), apenas marca como visto sem despejar o histórico.
                 if primeira:
                     continue
-
-                tipo   = (ev.get("type") or {}).get("text", "")
-                clock  = (ev.get("clock") or {}).get("displayValue", "")
-                _m     = re.match(r"\d+", clock or "")
-                minuto = _m.group(0) if _m else "?"
-
-                time_ev = (ev.get("team") or {}).get("displayName", "")
-                parts   = ev.get("participants", [])
-                scorer  = next(
-                    (p for p in parts if "scorer" in (p.get("type") or {}).get("text", "").lower()),
-                    parts[0] if parts else {}
-                )
-                jogador = (scorer.get("athlete") or {}).get("displayName", "?")
-
-                tipo_lower = tipo.lower()
-                if "goal" in tipo_lower:
-                    contra = "own" in tipo_lower
-                    emoji  = "❌" if contra else "⚽"
-                    msg = (
-                        f"{emoji} **GOL!** `{minuto}'` — **{jogador}**"
-                        f"{' (contra)' if contra else f' ({time_ev})'}\n"
-                        f"📊 **{nome_h} {g_casa} × {g_fora} {nome_a}**"
-                    )
-                elif "yellow" in tipo_lower:
-                    msg = f"🟨 Cartão Amarelo `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
-                elif "red" in tipo_lower:
-                    msg = f"🟥 Cartão Vermelho `{minuto}'` — **{jogador}** ({time_ev})\n**{nome_h} × {nome_a}**"
-                else:
+                msg = _bz_incident_para_msg(inc, nome_h, nome_a)
+                if not msg:
                     continue
-
                 for uid in jd["user_ids"]:
                     try:
                         user = await bot.fetch_user(uid)
@@ -3626,9 +3670,12 @@ async def monitorar_eventos_times():
             if primeira:
                 jd["primeira_leitura"] = False
 
-            if state == "post" and not jd.get("encerrado"):
+            if status == "finished" and not jd.get("encerrado"):
                 if not primeira:
-                    msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {g_casa} × {g_fora} {nome_a}**"
+                    pen     = ev.get("penalty_shootout") or {}
+                    pen_txt = (f"  (pênaltis {pen.get('home')} × {pen.get('away')})"
+                               if pen.get("home") is not None else "")
+                    msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {home_s} × {away_s} {nome_a}**{pen_txt}"
                     for uid in jd["user_ids"]:
                         try:
                             user = await bot.fetch_user(uid)
