@@ -19,6 +19,7 @@ load_dotenv()
 
 TOKEN_DO_DISCORD  = os.getenv("TOKEN_DISCORD")
 CANAL_RESUMO_ID   = int(os.getenv("CANAL_JOGOS_DO_DIA", "0"))
+CANAL_EVENTO_ID   = int(os.getenv("CANAL_EVENTO", "1510344579927249017"))
 # Railway injeta PORT automaticamente; localmente usa SERVER_PORT ou 8080
 SERVER_PORT       = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
 SERVER_URL        = os.getenv("SERVER_URL", f"http://localhost:{SERVER_PORT}")
@@ -1752,6 +1753,63 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
     )
 
     return await _html_para_png(html, "jogos_temp.png", width=640)
+
+
+async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
+    """Capa 16:9 (960×540) para evento agendado do Discord."""
+    nome_casa = jogo["teams"]["home"]["name"]
+    nome_fora = jogo["teams"]["away"]["name"]
+    urls = [u for u in (
+        jogo["teams"]["home"].get("logo", ""),
+        jogo["teams"]["away"].get("logo", ""),
+    ) if u]
+    logos = await _baixar_logos_paralelo(urls) if urls else {}
+    b64_casa = logos.get(jogo["teams"]["home"].get("logo", ""), "")
+    b64_fora = logos.get(jogo["teams"]["away"].get("logo", ""), "")
+
+    try:
+        dt = datetime.fromisoformat(jogo["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
+        data_linha = dt.strftime("%d/%m/%Y")
+        hora_linha = dt.strftime("%H:%M")
+    except Exception:
+        data_linha, hora_linha = "—", "—"
+
+    css = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:960px;height:540px;background:linear-gradient(145deg,#0f172a 0%,#1e3a5f 45%,#16213e 100%);
+     color:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;overflow:hidden;position:relative}
+.bg{position:absolute;inset:0;opacity:.08;background:radial-gradient(circle at 20% 50%,#3b82f6 0%,transparent 50%),
+     radial-gradient(circle at 80% 50%,#ef4444 0%,transparent 50%)}
+.liga{font-size:15px;font-weight:600;color:#93c5fd;letter-spacing:1.2px;text-transform:uppercase;
+      margin-bottom:28px;z-index:1}
+.confronto{display:flex;align-items:center;justify-content:center;gap:36px;width:100%;padding:0 48px;z-index:1}
+.lado{display:flex;flex-direction:column;align-items:center;gap:14px;flex:1;max-width:320px}
+.lado .nome{font-size:22px;font-weight:800;text-align:center;line-height:1.2}
+.lado img{width:88px;height:88px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.4))}
+.vs{font-size:42px;font-weight:900;color:#64748b;flex-shrink:0}
+.horario{margin-top:32px;font-size:20px;font-weight:700;color:#e2e8f0;z-index:1}
+.horario span{color:#93c5fd;font-size:28px;margin-left:8px}
+.rodape{position:absolute;bottom:18px;font-size:11px;color:#475569;letter-spacing:.5px}
+"""
+    html = (
+        f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
+        f'<div class="bg"></div>'
+        f'<div class="liga">⚽ {liga_nome}</div>'
+        f'<div class="confronto">'
+        f'<div class="lado">'
+        f'{_img_tag(b64_casa, nome_casa, 88)}'
+        f'<span class="nome">{nome_casa}</span></div>'
+        f'<div class="vs">×</div>'
+        f'<div class="lado">'
+        f'{_img_tag(b64_fora, nome_fora, 88)}'
+        f'<span class="nome">{nome_fora}</span></div>'
+        f'</div>'
+        f'<div class="horario">{data_linha} · <span>{hora_linha}</span> BRT</div>'
+        f'<div class="rodape">Futebol</div>'
+        f'</body></html>'
+    )
+    return await _html_para_png(html, "evento_cover_temp.png", width=960)
 
 
 async def gerar_artilheiro_png(artilheiros: list, nome_liga: str) -> str:
@@ -3647,13 +3705,19 @@ class SeguirView(discord.ui.View):
         self.btn_play.callback = self._on_player
         self.add_item(self.btn_play)
 
+        self.btn_evento = discord.ui.Button(
+            label="📅 Criar Evento", style=discord.ButtonStyle.success, disabled=True, row=1)
+        self.btn_evento.callback = self._on_criar_evento
+        self.add_item(self.btn_evento)
+
     async def _on_select(self, interaction: discord.Interaction):
         idx = int(interaction.data["values"][0])
         self.selected = self.jogos[idx]
         short = self.selected["fixture"]["status"]["short"]
         is_live = short in self._LIVE_STATUSES or short == "HT" or _botao_player_visivel(self.selected)
-        self.btn_det.disabled  = False
-        self.btn_play.disabled = not (IPTV_URL and is_live)
+        self.btn_det.disabled     = False
+        self.btn_play.disabled    = not (IPTV_URL and is_live)
+        self.btn_evento.disabled  = False
         await interaction.response.edit_message(view=self)
 
     async def _on_detalhes(self, interaction: discord.Interaction):
@@ -3735,6 +3799,132 @@ class SeguirView(discord.ui.View):
                 f"⚠️ Canal não encontrado na IPTV para **{nome_casa} × {nome_fora}**.",
                 ephemeral=True,
             )
+
+    async def _on_criar_evento(self, interaction: discord.Interaction):
+        if not self.selected:
+            await interaction.response.send_message("Selecione um jogo primeiro.", ephemeral=True)
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Use este botão em um servidor.", ephemeral=True)
+            return
+
+        me = interaction.guild.me
+        if not me or not me.guild_permissions.manage_events:
+            await interaction.response.send_message(
+                "❌ O bot precisa da permissão **Gerenciar Eventos** neste servidor.",
+                ephemeral=True,
+            )
+            return
+
+        jogo      = self.selected
+        nome_casa = jogo["teams"]["home"]["name"]
+        nome_fora = jogo["teams"]["away"]["name"]
+        titulo    = f"{nome_casa} × {nome_fora}"
+
+        try:
+            start_dt = datetime.fromisoformat(
+                jogo["fixture"]["date"].replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except Exception:
+            await interaction.response.send_message("❌ Data do jogo inválida.", ephemeral=True)
+            return
+
+        agora = datetime.now(timezone.utc)
+        if start_dt < agora:
+            if jogo["fixture"]["status"]["short"] in ("FT", "AET", "PEN"):
+                await interaction.response.send_message(
+                    "❌ Este jogo já encerrou — não é possível criar evento.", ephemeral=True,
+                )
+                return
+            start_dt = agora + timedelta(minutes=2)
+
+        self.btn_evento.disabled = True
+        self.btn_evento.label    = "⏳ Criando..."
+        await interaction.response.edit_message(view=self)
+
+        slug_key  = next((k for k, v in LIGAS.items() if v == self.slug), self.slug or "brasileirao")
+        liga_nome = LIGAS_META.get(slug_key, {}).get("nome", self.slug or "Futebol")
+        cover_path = None
+
+        try:
+            cover_path = await gerar_evento_cover_png(jogo, liga_nome)
+            with open(cover_path, "rb") as f:
+                cover_bytes = f.read()
+
+            meta       = jogo.get("meta", {})
+            venue      = meta.get("venue", "")
+            broadcasts = _canais_tv(jogo, self.slug)
+            tv_line    = ", ".join(broadcasts[:3]) if broadcasts else "A confirmar"
+            descricao  = (
+                f"⚽ {liga_nome}\n"
+                f"🏟️ {venue or 'Estádio a confirmar'}\n"
+                f"📺 {tv_line}\n\n"
+                f"Assista com a galera no servidor!"
+            )[:1000]
+
+            location = SERVER_URL.rstrip("/")
+            if len(location) > 100:
+                location = location[:100]
+
+            end_dt = start_dt + timedelta(hours=2, minutes=15)
+            evento = await interaction.guild.create_scheduled_event(
+                name=titulo[:100],
+                description=descricao,
+                start_time=start_dt,
+                end_time=end_dt,
+                entity_type=discord.EntityType.external,
+                location=location,
+                privacy_level=discord.PrivacyLevel.guild_only,
+                image=cover_bytes,
+            )
+
+            link = evento.url
+            data_brt = start_dt.astimezone(BRT).strftime("%d/%m/%Y às %H:%M")
+
+            canal = bot.get_channel(CANAL_EVENTO_ID)
+            if canal is None:
+                try:
+                    canal = await bot.fetch_channel(CANAL_EVENTO_ID)
+                except Exception:
+                    canal = None
+
+            if canal:
+                await canal.send(
+                    f"📅 **Evento criado:** {titulo}\n"
+                    f"🗓️ {data_brt} (BRT)\n"
+                    f"🔗 {link}"
+                )
+            else:
+                print(f"[Evento] Canal {CANAL_EVENTO_ID} não encontrado.")
+
+            self.btn_evento.label = "✅ Evento criado"
+            await interaction.message.edit(view=self)
+            await interaction.followup.send(
+                f"✅ Evento **{titulo}** criado!\n"
+                f"🗓️ {data_brt} (BRT)\n"
+                f"🔗 {link}"
+                + ("" if canal else "\n⚠️ Não foi possível avisar no canal de eventos."),
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            self.btn_evento.disabled = False
+            self.btn_evento.label    = "📅 Criar Evento"
+            await interaction.message.edit(view=self)
+            await interaction.followup.send(
+                "❌ Sem permissão para criar eventos neste servidor.", ephemeral=True,
+            )
+        except Exception as e:
+            print(f"[CriarEvento] Erro: {e}")
+            self.btn_evento.disabled = False
+            self.btn_evento.label    = "📅 Criar Evento"
+            await interaction.message.edit(view=self)
+            await interaction.followup.send(f"❌ Erro ao criar evento: `{e}`", ephemeral=True)
+        finally:
+            if cover_path and os.path.isfile(cover_path):
+                try:
+                    os.remove(cover_path)
+                except OSError:
+                    pass
 
 
 # ==========================================
