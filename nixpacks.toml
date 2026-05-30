@@ -1,0 +1,5 @@
+# Força o Nixpacks a tratar o deploy como projeto Python.
+# Sem isso, a presença do package.json (usado só localmente para o backend
+# Convex) faz o Railway detectar Node.js e pular o pip install -r requirements.txt,
+# resultando em "playwright: command not found".
+providers = ["python"]
