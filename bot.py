@@ -61,6 +61,12 @@ _BZ_LIGA_TO_ID: dict[str, int] = {
     "libertadores":  32,
     "sulamericana":  33,
 }
+# league_id Bzzoiro → slug ESPN (para tags de liga em fixtures)
+_BZ_ID_TO_SLUG: dict[int, str] = {
+    9:  "BRA.1",
+    32: "CONMEBOL.LIBERTADORES",
+    33: "CONMEBOL.SUDAMERICANA",
+}
 
 # Competições de mata-mata: !tabela mostra rodada atual, não tabela de pontos
 LIGAS_COPA = {"copadobrasil"}
@@ -563,6 +569,7 @@ def _bzzoiro_ev_to_fixture(ev: dict, logo_map: dict) -> dict:
         },
         "penalty": {"home": pen.get("home"), "away": pen.get("away")},
         "meta":    {"canal": "", "liga": _BZ_LEAGUE_NAMES.get(ev.get("league_id") or 0, "")},
+        "_slug":   _BZ_ID_TO_SLUG.get(ev.get("league_id") or 0, ""),
     }
 
 
@@ -1230,6 +1237,7 @@ def buscar_proximos_jogos(slug: str, team_id: str, limite: int = PROXIMOS_PADRAO
                 },
                 "goals": {"home": None, "away": None},
                 "meta": _extrair_meta(comp),
+                "_slug": slug,
             })
             if len(proximos) >= limite:
                 break
@@ -1252,7 +1260,7 @@ def buscar_proximos_espn_clube(slug: str, team_id: str, limite: int = PROXIMOS_P
     return jogos[:limite]
 
 
-def _espn_ev_to_fixture_proximo(ev: dict) -> dict:
+def _espn_ev_to_fixture_proximo(ev: dict, slug: str = "") -> dict:
     """Converte evento ESPN em fixture interno (jogo futuro)."""
     comp = (ev.get("competitions") or [{}])[0]
     competitors = comp.get("competitors") or []
@@ -1276,6 +1284,7 @@ def _espn_ev_to_fixture_proximo(ev: dict) -> dict:
         },
         "goals": {"home": None, "away": None},
         "meta": _extrair_meta(comp),
+        "_slug": slug,
     }
 
 
@@ -1312,7 +1321,7 @@ def buscar_proximos_jogos_scoreboard(slug: str, team_id: str, limite: int = 5) -
             if dt < hoje_dt:
                 continue
             vistos.add(eid)
-            candidatos.append((dt, _espn_ev_to_fixture_proximo(ev)))
+            candidatos.append((dt, _espn_ev_to_fixture_proximo(ev, slug)))
         if len(candidatos) >= limite:
             break
 
@@ -3931,7 +3940,10 @@ class SeguirView(discord.ui.View):
             else:
                 try:
                     dt  = datetime.fromisoformat(j["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
-                    desc = f"🕐 {dt.strftime('%H:%M')}"
+                    if dt.date() == datetime.now(tz=BRT).date():
+                        desc = f"🕐 {dt.strftime('%H:%M')}"
+                    else:
+                        desc = f"🗓️ {dt.strftime('%d/%m %H:%M')}"
                 except Exception:
                     desc = "🕐 —"
             options.append(discord.SelectOption(label=label, value=str(i), description=desc[:100]))
@@ -4575,6 +4587,11 @@ async def cmd_artilheiro(ctx, liga: str = ""):
         await msg.edit(content=f"Erro ao gerar imagem: {e}")
 
 
+def _view_proximos(jogos: list) -> "SeguirView | None":
+    """View com select + Detalhes / Player / Criar Evento para jogos futuros."""
+    return SeguirView(jogos, "") if jogos else None
+
+
 @bot.command(name="proximos")
 async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
     if not primeiro:
@@ -4596,6 +4613,15 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
     msg  = await ctx.send(f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**...")
     loop = asyncio.get_event_loop()
 
+    async def _enviar(jogos: list, nome_oficial: str, nome_liga: str):
+        try:
+            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+        except Exception as e:
+            await msg.edit(content=f"Erro ao gerar imagem: {e}")
+            return
+        await msg.delete()
+        await ctx.send(file=discord.File(caminho), view=_view_proximos(jogos))
+
     eh_selecao = bool(_canonical_selecao(nome_time)) or (liga_key in _LIGAS_SELECAO)
     if eh_selecao:
         selecao_result = await loop.run_in_executor(
@@ -4609,12 +4635,7 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
                 nome_liga = f"{meta['emoji']} {meta['nome']}"
             else:
                 nome_liga = "🌍 Seleções"
-            try:
-                caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-                await msg.delete()
-                await ctx.send(file=discord.File(caminho))
-            except Exception as e:
-                await msg.edit(content=f"Erro ao gerar imagem: {e}")
+            await _enviar(jogos, nome_oficial, nome_liga)
             return
         await msg.edit(
             content=f"Nenhum jogo futuro encontrado para a seleção **{nome_time}**.",
@@ -4634,12 +4655,7 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
             nome_liga = f"{meta['emoji']} {meta['nome']}"
         else:
             nome_liga = ""  # liga badge por card
-        try:
-            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-            await msg.delete()
-            await ctx.send(file=discord.File(caminho))
-        except Exception as e:
-            await msg.edit(content=f"Erro ao gerar imagem: {e}")
+        await _enviar(jogos, nome_oficial, nome_liga)
         return
 
     # Fallback: ESPN (liga de clubes especificada)
@@ -4649,12 +4665,7 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
         )
         if selecao_result:
             jogos, nome_oficial = selecao_result
-            try:
-                caminho = await gerar_proximos_png(jogos, nome_oficial, "🌍 Seleções")
-                await msg.delete()
-                await ctx.send(file=discord.File(caminho))
-            except Exception as e:
-                await msg.edit(content=f"Erro ao gerar imagem: {e}")
+            await _enviar(jogos, nome_oficial, "🌍 Seleções")
             return
         await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_time}**.")
         return
@@ -4672,12 +4683,7 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
         return
     meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
     nome_liga = f"{meta['emoji']} {meta['nome']}"
-    try:
-        caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-        await msg.delete()
-        await ctx.send(file=discord.File(caminho))
-    except Exception as e:
-        await msg.edit(content=f"Erro ao gerar imagem: {e}")
+    await _enviar(jogos, nome_oficial, nome_liga)
 
 
 @bot.command(name="chaveamento")
@@ -5611,6 +5617,14 @@ async def slash_proximos(
         nome_liga = f"{meta['emoji']} {meta['nome']}"
     else:
         nome_liga = ""
+    async def _enviar(jogos: list, nome_oficial: str, nl: str):
+        try:
+            caminho = await gerar_proximos_png(jogos, nome_oficial, nl)
+        except Exception as e:
+            await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+            return
+        await interaction.followup.send(file=discord.File(caminho), view=_view_proximos(jogos))
+
     eh_selecao = bool(_canonical_selecao(time)) or (liga_key in _LIGAS_SELECAO)
     if eh_selecao:
         selecao_result = await loop.run_in_executor(
@@ -5618,12 +5632,7 @@ async def slash_proximos(
         )
         if selecao_result:
             jogos, nome_oficial = selecao_result
-            nl = nome_liga or "🌍 Seleções"
-            try:
-                caminho = await gerar_proximos_png(jogos, nome_oficial, nl)
-                await interaction.followup.send(file=discord.File(caminho))
-            except Exception as e:
-                await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+            await _enviar(jogos, nome_oficial, nome_liga or "🌍 Seleções")
             return
         await interaction.followup.send(f"Nenhum jogo futuro encontrado para a seleção **{time}**.")
         return
@@ -5634,11 +5643,7 @@ async def slash_proximos(
     )
     if bz_result:
         jogos, nome_oficial = bz_result
-        try:
-            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-            await interaction.followup.send(file=discord.File(caminho))
-        except Exception as e:
-            await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+        await _enviar(jogos, nome_oficial, nome_liga)
         return
     if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
         selecao_result = await loop.run_in_executor(
@@ -5646,11 +5651,7 @@ async def slash_proximos(
         )
         if selecao_result:
             jogos, nome_oficial = selecao_result
-            try:
-                caminho = await gerar_proximos_png(jogos, nome_oficial, "🌍 Seleções")
-                await interaction.followup.send(file=discord.File(caminho))
-            except Exception as e:
-                await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+            await _enviar(jogos, nome_oficial, "🌍 Seleções")
             return
         await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{time}**.")
         return
@@ -5666,11 +5667,7 @@ async def slash_proximos(
     if not jogos:
         await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
         return
-    try:
-        caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-        await interaction.followup.send(file=discord.File(caminho))
-    except Exception as e:
-        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+    await _enviar(jogos, nome_oficial, nome_liga)
 
 
 @bot.tree.command(name="partida", description="Detalhes da partida mais recente de um time")
