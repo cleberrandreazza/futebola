@@ -3657,8 +3657,25 @@ class SeguindoView(discord.ui.View):
         )
 
 
+def _flatten_jogos_ativos(jogos_por_liga: dict) -> list:
+    """Lista plana de jogos não encerrados, cada um com `_slug` da liga ESPN."""
+    out: list = []
+    for chave, jogos in jogos_por_liga.items():
+        slug = LIGAS.get(chave) or ""
+        for j in jogos:
+            if j["fixture"]["status"]["short"] in ("FT", "AET", "PEN"):
+                continue
+            j["_slug"] = slug
+            out.append(j)
+    return out[:25]
+
+
+def _slug_do_jogo(jogo: dict, slug_padrao: str) -> str:
+    return jogo.get("_slug") or slug_padrao
+
+
 class SeguirView(discord.ui.View):
-    """Select menu com todos os jogos + botões Detalhes / Abrir Player para o selecionado."""
+    """Select menu com todos os jogos + botões Detalhes / Abrir Player / Criar Evento."""
 
     _LIVE_STATUSES = {"1H", "2H", "ET", "BT", "P", "LIVE"}
 
@@ -3674,7 +3691,11 @@ class SeguirView(discord.ui.View):
             short  = j["fixture"]["status"]["short"]
             home   = j["teams"]["home"]["name"]
             away   = j["teams"]["away"]["name"]
-            label  = f"{home[:18]} × {away[:18]}"[:100]
+            slug_j = _slug_do_jogo(j, slug)
+            chave  = next((k for k, v in LIGAS.items() if v == slug_j), "")
+            emoji  = LIGAS_META.get(chave, {}).get("emoji", "⚽") if slug_j else "⚽"
+            prefix = f"{emoji} " if j.get("_slug") else ""
+            label  = f"{prefix}{home[:16]} × {away[:16]}"[:100]
             if short in self._LIVE_STATUSES:
                 elapsed = j["fixture"]["status"].get("elapsed") or ""
                 desc = f"🔴 Ao Vivo{' · ' + str(elapsed) + chr(39) if elapsed else ''}"
@@ -3726,7 +3747,7 @@ class SeguirView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         jogo      = self.selected
-        slug      = self.slug
+        slug      = _slug_do_jogo(jogo, self.slug)
         broadcasts = _canais_tv(jogo, slug)
         meta       = jogo.get("meta", {})
         nome_casa  = jogo["teams"]["home"]["name"]
@@ -3754,7 +3775,7 @@ class SeguirView(discord.ui.View):
         await interaction.response.edit_message(view=self)
 
         jogo      = self.selected
-        slug      = self.slug
+        slug      = _slug_do_jogo(jogo, self.slug)
         nome_casa = jogo["teams"]["home"]["name"]
         nome_fora = jogo["teams"]["away"]["name"]
         event_id  = str(jogo["fixture"]["id"])
@@ -3842,8 +3863,9 @@ class SeguirView(discord.ui.View):
         self.btn_evento.label    = "⏳ Criando..."
         await interaction.response.edit_message(view=self)
 
-        slug_key  = next((k for k, v in LIGAS.items() if v == self.slug), self.slug or "brasileirao")
-        liga_nome = LIGAS_META.get(slug_key, {}).get("nome", self.slug or "Futebol")
+        slug_jogo = _slug_do_jogo(jogo, self.slug)
+        slug_key  = next((k for k, v in LIGAS.items() if v == slug_jogo), slug_jogo or "brasileirao")
+        liga_nome = LIGAS_META.get(slug_key, {}).get("nome", slug_jogo or "Futebol")
         cover_path = None
 
         try:
@@ -3853,7 +3875,7 @@ class SeguirView(discord.ui.View):
 
             meta       = jogo.get("meta", {})
             venue      = meta.get("venue", "")
-            broadcasts = _canais_tv(jogo, self.slug)
+            broadcasts = _canais_tv(jogo, slug_jogo)
             tv_line    = ", ".join(broadcasts[:3]) if broadcasts else "A confirmar"
             descricao  = (
                 f"⚽ {liga_nome}\n"
@@ -4105,9 +4127,12 @@ async def cmd_calendario(ctx, data_str: str = None):
 
     total = sum(len(v) for v in jogos_por_liga.values())
     img   = await gerar_resumo_diario_png(jogos_por_liga, data_display=data_display)
+    jogos_ativos = _flatten_jogos_ativos(jogos_por_liga)
+    view = SeguirView(jogos_ativos, "") if jogos_ativos else None
     await ctx.send(
         content=f"📅 **Jogos de {data_display}** — {total} partidas em {len(jogos_por_liga)} ligas",
         file=discord.File(img),
+        view=view,
     )
 
 
@@ -4447,7 +4472,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!hoje` `/hoje` — Jogos do dia em todas as ligas\n"
             "`!brasileirao` `!premierleague` `!champions` … — Jogos da liga hoje\n"
             "`!brasileirao 01/06/2026` — Jogos da liga em uma data específica\n"
-            "`!calendario 01/06/2026` — Jogos de todas as ligas em uma data"
+            "`!calendario 01/06/2026` — Jogos de todas as ligas + select (Detalhes / Player / Evento)"
         ),
         inline=False,
     )
