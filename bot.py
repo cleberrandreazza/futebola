@@ -3116,6 +3116,7 @@ class FootballBot(commands.Bot):
         atualizar_players.start()
         verificar_noticias_times.start()
         verificar_jogos_times.start()
+        monitorar_eventos_times.start()
         if CANAL_RESUMO_ID:
             resumo_diario.start()
         else:
@@ -3472,7 +3473,8 @@ async def verificar_noticias_times():
 
 @tasks.loop(minutes=2)
 async def verificar_jogos_times():
-    """A cada 2 min detecta jogos ao vivo de times seguidos e envia eventos via DM."""
+    """A cada 2 min detecta jogos ao vivo de times seguidos e avisa o início via DM.
+    O monitoramento de gols/cartões/fim fica em monitorar_eventos_times (30s)."""
     if not _SEGUINDO:
         return
 
@@ -3530,7 +3532,13 @@ async def verificar_jogos_times():
                 except Exception:
                     pass
 
-    # Monitorar eventos dos jogos em andamento
+
+@tasks.loop(seconds=30)
+async def monitorar_eventos_times():
+    """A cada 30s consulta placar/eventos dos jogos já detectados e envia gols, cartões e fim de jogo via DM."""
+    if not _JOGOS_TIMES:
+        return
+    loop = asyncio.get_event_loop()
     for eid, jd in list(_JOGOS_TIMES.items()):
         if jd.get("encerrado"):
             del _JOGOS_TIMES[eid]
