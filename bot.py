@@ -3210,6 +3210,9 @@ def _salvar_seguindo(data: dict) -> None:
 _SEGUINDO: dict = _carregar_seguindo()
 # event_id → {home, away, slug, user_ids: set, eventos: set, encerrado: bool, notif_inicio: bool}
 _JOGOS_TIMES: dict = {}
+# event_ids de jogos já finalizados (evita reprocessar/reenviar quando o jogo
+# encerrado continua aparecendo no placar do dia).
+_JOGOS_ENCERRADOS: set = set()
 
 
 def _time_match(query: str, nome: str) -> bool:
@@ -3505,7 +3508,15 @@ async def verificar_jogos_times():
         if not interessados:
             continue
 
+        # Jogo já finalizado anteriormente: não ressuscitar nem reenviar nada.
+        if eid in _JOGOS_ENCERRADOS:
+            continue
+
         if eid not in _JOGOS_TIMES:
+            # Só passa a acompanhar jogos que estão ao vivo; se ao ser visto
+            # pela primeira vez já estiver encerrado, ignora (resultado antigo).
+            if state in ("FT", "AET", "PEN"):
+                continue
             _JOGOS_TIMES[eid] = {
                 "home": home, "away": away,
                 "slug": j["slug"],
@@ -3513,6 +3524,7 @@ async def verificar_jogos_times():
                 "eventos": set(),
                 "encerrado": False,
                 "notif_inicio": False,
+                "primeira_leitura": True,
             }
         else:
             _JOGOS_TIMES[eid]["user_ids"] |= interessados
@@ -3540,8 +3552,8 @@ async def monitorar_eventos_times():
         return
     loop = asyncio.get_event_loop()
     for eid, jd in list(_JOGOS_TIMES.items()):
-        if jd.get("encerrado"):
-            del _JOGOS_TIMES[eid]
+        if eid in _JOGOS_ENCERRADOS or jd.get("encerrado"):
+            _JOGOS_TIMES.pop(eid, None)
             continue
         slug = jd.get("slug")
         if not slug:
@@ -3563,18 +3575,22 @@ async def monitorar_eventos_times():
             nome_h   = (home_c.get("team") or {}).get("displayName", jd["home"])
             nome_a   = (away_c.get("team") or {}).get("displayName", jd["away"])
 
+            primeira = jd.get("primeira_leitura", False)
             for ev in sumario.get("keyEvents", []):
                 ev_id = str(ev.get("id", ""))
                 if not ev_id or ev_id in jd["eventos"]:
                     continue
                 jd["eventos"].add(ev_id)
+                # Na primeira leitura (jogo já estava em andamento ao ser
+                # detectado), apenas registra os eventos como vistos sem
+                # notificar o histórico todo de uma vez.
+                if primeira:
+                    continue
 
                 tipo   = (ev.get("type") or {}).get("text", "")
                 clock  = (ev.get("clock") or {}).get("displayValue", "")
-                try:
-                    minuto = int(clock.split(":")[0])
-                except Exception:
-                    minuto = "?"
+                _m     = re.match(r"\d+", clock or "")
+                minuto = _m.group(0) if _m else "?"
 
                 time_ev = (ev.get("team") or {}).get("displayName", "")
                 parts   = ev.get("participants", [])
@@ -3607,15 +3623,21 @@ async def monitorar_eventos_times():
                     except Exception:
                         pass
 
+            if primeira:
+                jd["primeira_leitura"] = False
+
             if state == "post" and not jd.get("encerrado"):
-                msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {g_casa} × {g_fora} {nome_a}**"
-                for uid in jd["user_ids"]:
-                    try:
-                        user = await bot.fetch_user(uid)
-                        await user.send(msg_fim)
-                    except Exception:
-                        pass
+                if not primeira:
+                    msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {g_casa} × {g_fora} {nome_a}**"
+                    for uid in jd["user_ids"]:
+                        try:
+                            user = await bot.fetch_user(uid)
+                            await user.send(msg_fim)
+                        except Exception:
+                            pass
                 jd["encerrado"] = True
+                _JOGOS_ENCERRADOS.add(eid)
+                _JOGOS_TIMES.pop(eid, None)
 
         except Exception as e:
             print(f"[JogosTimes] {eid}: {e}")
