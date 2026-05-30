@@ -4121,18 +4121,29 @@ class SeguirView(discord.ui.View):
                 f"Assista com a galera no servidor!"
             )[:1000]
 
-            location = SERVER_URL.rstrip("/")
-            if len(location) > 100:
-                location = location[:100]
+            canal_voz = bot.get_channel(CANAL_EVENTO_ID)
+            if canal_voz is None:
+                try:
+                    canal_voz = await bot.fetch_channel(CANAL_EVENTO_ID)
+                except Exception:
+                    canal_voz = None
 
-            end_dt = start_dt + timedelta(hours=2, minutes=15)
+            if not isinstance(canal_voz, (discord.VoiceChannel, discord.StageChannel)):
+                self.btn_evento.disabled = False
+                self.btn_evento.label    = "📅 Criar Evento"
+                await interaction.message.edit(view=self)
+                await interaction.followup.send(
+                    f"❌ O canal `{CANAL_EVENTO_ID}` não foi encontrado ou não é um canal de voz.",
+                    ephemeral=True,
+                )
+                return
+
             evento = await interaction.guild.create_scheduled_event(
                 name=titulo[:100],
                 description=descricao,
                 start_time=start_dt,
-                end_time=end_dt,
-                entity_type=discord.EntityType.external,
-                location=location,
+                entity_type=discord.EntityType.voice,
+                channel=canal_voz,
                 privacy_level=discord.PrivacyLevel.guild_only,
                 image=cover_bytes,
             )
@@ -4140,29 +4151,26 @@ class SeguirView(discord.ui.View):
             link = evento.url
             data_brt = start_dt.astimezone(BRT).strftime("%d/%m/%Y às %H:%M")
 
-            canal = bot.get_channel(CANAL_EVENTO_ID)
-            if canal is None:
-                try:
-                    canal = await bot.fetch_channel(CANAL_EVENTO_ID)
-                except Exception:
-                    canal = None
-
-            if canal:
-                await canal.send(
+            avisou = True
+            try:
+                await canal_voz.send(
                     f"📅 **Evento criado:** {titulo}\n"
                     f"🗓️ {data_brt} (BRT)\n"
+                    f"🔊 {canal_voz.mention}\n"
                     f"🔗 {link}"
                 )
-            else:
-                print(f"[Evento] Canal {CANAL_EVENTO_ID} não encontrado.")
+            except Exception as e:
+                avisou = False
+                print(f"[Evento] Falha ao avisar no canal de voz {CANAL_EVENTO_ID}: {e}")
 
             self.btn_evento.label = "✅ Evento criado"
             await interaction.message.edit(view=self)
             await interaction.followup.send(
                 f"✅ Evento **{titulo}** criado!\n"
                 f"🗓️ {data_brt} (BRT)\n"
+                f"🔊 {canal_voz.mention}\n"
                 f"🔗 {link}"
-                + ("" if canal else "\n⚠️ Não foi possível avisar no canal de eventos."),
+                + ("" if avisou else "\n⚠️ Não foi possível avisar no chat do canal de voz."),
                 ephemeral=True,
             )
         except discord.Forbidden:
@@ -5357,10 +5365,45 @@ class PartidaSelectView(discord.ui.View):
             html = await _gerar_partida_html(dados)
             url  = _publicar_partida_web(html)
             ev   = dados.get("evento") or {}
-            titulo = f"{ev.get('home_team','?')} × {ev.get('away_team','?')}"
-            await interaction.followup.send(f"📄 **{titulo}**\n🔗 {url}")
+            nome_casa = ev.get("home_team", "?")
+            nome_fora = ev.get("away_team", "?")
+            titulo    = f"{nome_casa} × {nome_fora}"
+
+            partes = [f"📄 **{titulo}**", f"🔗 {url}"]
+
+            status  = (ev.get("status") or "").lower()
+            ao_vivo = status not in ("notstarted", "finished", "")
+            if ao_vivo and IPTV_URL:
+                player_url = await self._gerar_player_url(loop, ev, eid, nome_casa, nome_fora)
+                if player_url:
+                    partes.append(f"📺 **Player ao vivo:** {player_url}")
+
+            await interaction.followup.send("\n".join(partes))
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
+
+    async def _gerar_player_url(self, loop, ev: dict, eid: int,
+                                nome_casa: str, nome_fora: str) -> str | None:
+        """Cria sessão de player HLS para a partida ao vivo (mesma página do !brasileirao)."""
+        slug  = _BZ_ID_TO_SLUG.get(ev.get("league_id") or 0, "")
+        canal = await loop.run_in_executor(None, _iptv_buscar_jogo, nome_casa, nome_fora)
+        if not canal:
+            candidatos = list(_TV_POR_LIGA.get(slug, [])) + ["ESPN FHD", "ESPN", "SporTV"]
+            vistos: set[str] = set()
+            for nome in candidatos:
+                if nome in vistos:
+                    continue
+                vistos.add(nome)
+                canal = await loop.run_in_executor(None, _iptv_buscar_canal, nome)
+                if canal:
+                    break
+        if not canal:
+            return None
+        token = _criar_sessao(
+            canal["url"], f"{nome_casa} × {nome_fora}", str(eid), slug,
+            eid, nome_casa, nome_fora,
+        )
+        return f"{SERVER_URL}/player/{token}"
 
 
 @bot.command(name="partida")
