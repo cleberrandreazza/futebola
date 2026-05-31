@@ -1,10 +1,12 @@
 import os
 import re
 import json
+import time
 import base64
 import asyncio
 import functools
 import secrets
+from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as _ET
 import discord
 from discord.ext import commands, tasks
@@ -30,6 +32,30 @@ BRT               = timezone(timedelta(hours=-3))
 HORARIO_RESUMO    = __import__("datetime").time(
     int(_hora_env[0]), int(_hora_env[1]), tzinfo=BRT
 )
+
+# Cache HTTP (reduz chamadas repetidas em tasks e monitoramento)
+_API_CACHE: dict[str, tuple[float, object]] = {}
+_API_CACHE_TTL = 60  # segundos
+
+
+def _cache_key(prefix: str, url: str, params: dict | None) -> str:
+    return f"{prefix}:{url}:{json.dumps(params or {}, sort_keys=True)}"
+
+
+def _cache_get(key: str):
+    entry = _API_CACHE.get(key)
+    if not entry:
+        return None
+    ts, data = entry
+    if time.time() - ts > _API_CACHE_TTL:
+        del _API_CACHE[key]
+        return None
+    return data
+
+
+def _cache_set(key: str, data: object) -> None:
+    _API_CACHE[key] = (time.time(), data)
+
 
 # ==========================================
 # ESPN API — sem chave, dados 2026 atuais
@@ -451,11 +477,17 @@ def _img_tag(b64: str, nome: str, tamanho: int = 24) -> str:
 # ==========================================
 
 def _espn_get(url: str, params: dict = None) -> dict | None:
+    key = _cache_key("espn", url, params)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     try:
         r = requests.get(url, params=params, timeout=10,
                          headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200:
-            return r.json()
+            data = r.json()
+            _cache_set(key, data)
+            return data
         print(f"[ESPN] {url} -> HTTP {r.status_code}")
     except Exception as e:
         print(f"[ESPN] Erro: {e}")
@@ -469,15 +501,22 @@ def _espn_get(url: str, params: dict = None) -> dict | None:
 def _bzzoiro_get(endpoint: str, params: dict = None) -> dict | None:
     if not BZZOIRO_TOKEN:
         return None
+    url = f"{BZZOIRO_BASE}/{endpoint.lstrip('/')}"
+    key = _cache_key("bz", url, params)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     try:
         r = requests.get(
-            f"{BZZOIRO_BASE}/{endpoint.lstrip('/')}",
+            url,
             headers={"Authorization": f"Token {BZZOIRO_TOKEN}"},
             params=params,
             timeout=10,
         )
         if r.status_code == 200:
-            return r.json()
+            data = r.json()
+            _cache_set(key, data)
+            return data
         print(f"[Bzzoiro] {endpoint} -> HTTP {r.status_code}")
     except Exception as e:
         print(f"[Bzzoiro] Erro {endpoint}: {e}")
@@ -3477,10 +3516,42 @@ def _noticia_equipe_principal(time: str, title: str) -> bool:
     return True
 
 
+_NOTICIA_ONTEM_RE = re.compile(
+    r"(?i)\b(ontem|yesterday|dia anterior|há \d+ dia|ha \d+ dia)\b"
+)
+
+
+def _parse_rss_pub_date(item: _ET.Element) -> datetime | None:
+    """Data de publicação do item RSS (Google News usa pubDate RFC 822)."""
+    pub = item.findtext("pubDate") or item.findtext("{http://www.w3.org/2005/Atom}published")
+    if not pub:
+        return None
+    try:
+        dt = parsedate_to_datetime(pub.strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BRT)
+    except Exception:
+        return None
+
+
+def _noticia_e_de_hoje(pub_dt: datetime | None, title: str) -> bool:
+    """Aceita só notícias publicadas hoje (BRT), nunca do dia anterior."""
+    if pub_dt is None:
+        return False
+    if pub_dt.date() != datetime.now(tz=BRT).date():
+        return False
+    if _NOTICIA_ONTEM_RE.search(title or ""):
+        return False
+    return True
+
+
 async def _buscar_noticias_time(time: str) -> list[dict]:
-    """Busca notícias recentes do Google News RSS para o time principal."""
-    query = url_quote(f'"{time}" futebol -feminino -feminina -"futebol feminino"')
-    url   = f"https://news.google.com/rss/search?q={query}&hl=pt-BR&gl=BR&ceid=BR:pt"
+    """Notícias de hoje (BRT) do time principal via Google News RSS."""
+    query = url_quote(
+        f'"{time}" futebol when:1d -feminino -feminina -"futebol feminino"'
+    )
+    url = f"https://news.google.com/rss/search?q={query}&hl=pt-BR&gl=BR&ceid=BR:pt"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -3489,13 +3560,19 @@ async def _buscar_noticias_time(time: str) -> list[dict]:
                 xml_text = await r.text()
         root  = _ET.fromstring(xml_text)
         items = []
-        for item in root.findall(".//item")[:20]:
-            title = item.findtext("title") or ""
-            link  = item.findtext("link") or ""
-            if title and link and _noticia_equipe_principal(time, title):
-                items.append({"title": title, "link": link})
-                if len(items) >= 5:
-                    break
+        for item in root.findall(".//item")[:40]:
+            title  = item.findtext("title") or ""
+            link   = item.findtext("link") or ""
+            pub_dt = _parse_rss_pub_date(item)
+            if not title or not link:
+                continue
+            if not _noticia_equipe_principal(time, title):
+                continue
+            if not _noticia_e_de_hoje(pub_dt, title):
+                continue
+            items.append({"title": title, "link": link, "pub": pub_dt})
+            if len(items) >= 5:
+                break
         return items
     except Exception as e:
         print(f"[Noticias] {time}: {e}")
@@ -3615,6 +3692,37 @@ async def atualizar_players():
             print(f"[Player] Erro ao atualizar guild {guild_id}: {e}")
 
 
+async def _buscar_jogos_resumo_paralelo(chaves: list[str] | None = None) -> dict:
+    """Busca jogos de várias ligas em paralelo (resumo / !hoje)."""
+    chaves = chaves or LIGAS_RESUMO
+    loop = asyncio.get_event_loop()
+
+    def _fetch(chave: str):
+        try:
+            if chave in LIGAS_COPA:
+                jogos = buscar_jogos_copa_hoje()
+            else:
+                jogos = buscar_jogos_do_dia(LIGAS[chave])
+            return chave, jogos if jogos else None
+        except Exception as e:
+            print(f"[Resumo] {chave}: {e}")
+            return chave, None
+
+    parts = await asyncio.gather(
+        *[loop.run_in_executor(None, _fetch, c) for c in chaves],
+        return_exceptions=True,
+    )
+    out: dict = {}
+    for p in parts:
+        if isinstance(p, Exception):
+            print(f"[Resumo] gather: {p}")
+            continue
+        chave, jogos = p
+        if jogos:
+            out[chave] = jogos
+    return out
+
+
 # ==========================================
 # RESUMO DIÁRIO — task agendada
 # ==========================================
@@ -3629,17 +3737,7 @@ async def resumo_diario():
     print(f"[Resumo] Gerando resumo diário para #{canal.name}...")
     await canal.send("⏳ Buscando jogos do dia em todas as ligas...")
 
-    jogos_por_liga = {}
-    for chave in LIGAS_RESUMO:
-        try:
-            if chave in LIGAS_COPA:
-                jogos = buscar_jogos_copa_hoje()
-            else:
-                jogos = buscar_jogos_do_dia(LIGAS[chave])
-            if jogos:
-                jogos_por_liga[chave] = jogos
-        except Exception as e:
-            print(f"[Resumo] Erro buscando {chave}: {e}")
+    jogos_por_liga = await _buscar_jogos_resumo_paralelo()
 
     # Apaga a mensagem de "buscando" e envia a imagem
     async for msg in canal.history(limit=5):
@@ -3681,6 +3779,7 @@ async def verificar_noticias_times():
                     n for n in noticias
                     if n["link"] not in urls_vistas
                     and _noticia_equipe_principal(time, n["title"])
+                    and _noticia_e_de_hoje(n.get("pub"), n["title"])
                 ]
                 if not novas:
                     continue
@@ -3841,6 +3940,29 @@ async def monitorar_eventos_times():
 
         except Exception as e:
             print(f"[JogosTimes] {eid}: {e}")
+
+
+def _log_task_error(nome: str, error: BaseException) -> None:
+    import traceback
+    print(f"[Task:{nome}] {error!r}")
+    traceback.print_exception(type(error), error, error.__traceback__)
+
+
+for _task_loop, _task_nome in (
+    (checar_jogos_ao_vivo, "checar_jogos_ao_vivo"),
+    (atualizar_players, "atualizar_players"),
+    (resumo_diario, "resumo_diario"),
+    (verificar_noticias_times, "verificar_noticias_times"),
+    (verificar_jogos_times, "verificar_jogos_times"),
+    (monitorar_eventos_times, "monitorar_eventos_times"),
+):
+    @_task_loop.before_loop
+    async def _before_task(_loop=_task_loop):
+        await bot.wait_until_ready()
+
+    @_task_loop.error
+    async def _on_task_error(error, _nome=_task_nome):
+        _log_task_error(_nome, error)
 
 
 # ==========================================
@@ -4550,17 +4672,7 @@ async def _responder_jogos_hoje(
         msg = await ctx.send("📅 Buscando jogos do dia em todas as ligas...")
 
     loop = asyncio.get_event_loop()
-    jogos_por_liga: dict = {}
-    for chave in LIGAS_RESUMO:
-        try:
-            if chave in LIGAS_COPA:
-                jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
-            else:
-                jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
-            if jogos:
-                jogos_por_liga[chave] = jogos
-        except Exception as e:
-            print(f"[Hoje] Erro em {chave}: {e}")
+    jogos_por_liga = await _buscar_jogos_resumo_paralelo()
 
     if not jogos_por_liga:
         texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
