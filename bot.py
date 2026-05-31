@@ -4346,6 +4346,11 @@ class SeguirView(discord.ui.View):
         self.btn_evento.callback = self._on_criar_evento
         self.add_item(self.btn_evento)
 
+        self.btn_seguir = discord.ui.Button(
+            label="⭐ Seguir time", style=discord.ButtonStyle.success, disabled=True, row=2)
+        self.btn_seguir.callback = self._on_seguir_time
+        self.add_item(self.btn_seguir)
+
     async def _on_select(self, interaction: discord.Interaction):
         idx = int(interaction.data["values"][0])
         self.selected = self.jogos[idx]
@@ -4354,7 +4359,20 @@ class SeguirView(discord.ui.View):
         self.btn_det.disabled     = False
         self.btn_play.disabled    = not (IPTV_URL and is_live)
         self.btn_evento.disabled  = False
+        self.btn_seguir.disabled  = False
         await interaction.response.edit_message(view=self)
+
+    async def _on_seguir_time(self, interaction: discord.Interaction):
+        if not self.selected:
+            await interaction.response.send_message("Selecione um jogo primeiro.", ephemeral=True)
+            return
+        home = self.selected["teams"]["home"]["name"]
+        away = self.selected["teams"]["away"]["name"]
+        await interaction.response.send_message(
+            "Qual time você quer seguir?",
+            view=SeguirEscolhaTimeView([home, away]),
+            ephemeral=True,
+        )
 
     async def _on_detalhes(self, interaction: discord.Interaction):
         if not self.selected:
@@ -4461,8 +4479,454 @@ class SeguirView(discord.ui.View):
 
 
 # ==========================================
+# UX — menu, atalhos e menos digitação
+# ==========================================
+
+def _lista_times_menu() -> list[str]:
+    """Times para selects do menu / !seguir sem argumentos."""
+    if _bz_team_map_cache:
+        nomes = sorted({d for _, d in _bz_team_map_cache.values()})
+    else:
+        nomes = []
+    vistos: set[str] = set()
+    out: list[str] = []
+    for t in _TIMES_BR_AUTOCOMPLETE + nomes:
+        k = t.lower()
+        if k not in vistos:
+            vistos.add(k)
+            out.append(t)
+        if len(out) >= 25:
+            break
+    return out
+
+
+async def _executar_seguir(user: discord.abc.User, time: str) -> str:
+    """Registra time seguido e tenta DM. Retorna mensagem para o usuário."""
+    time = (time or "").strip()
+    if not time:
+        return "❌ Informe o nome do time."
+    uid_str = str(user.id)
+    if uid_str not in _SEGUINDO:
+        _SEGUINDO[uid_str] = {"times": [], "noticias_vistas": {}}
+    dados = _SEGUINDO[uid_str]
+    if any(_strip_accents(t.lower()) == _strip_accents(time.lower())
+           for t in dados.get("times", [])):
+        return f"📌 Você já segue **{time}**. Use `!seguindo` ou o menu **Meus times**."
+    dados.setdefault("times", []).append(time)
+    _salvar_seguindo(_SEGUINDO)
+    try:
+        await user.send(
+            f"⭐ **Você está seguindo {time}!**\n"
+            f"Você receberá aqui:\n"
+            f"• 📰 Notícias e novidades\n"
+            f"• ⚽ Alertas quando o jogo começar\n"
+            f"• 🥅 Gols e eventos importantes\n"
+            f"• 🏁 Resultado final\n\n"
+            f"Use `!seguindo` ou o menu para deixar de seguir."
+        )
+        return f"✅ Seguindo **{time}**! Confirmação enviada no privado."
+    except discord.Forbidden:
+        return (
+            f"✅ Seguindo **{time}**!\n"
+            f"⚠️ Não foi possível enviar DM. Ative mensagens diretas do servidor "
+            f"em Configurações → Privacidade."
+        )
+
+
+async def _responder_jogos_hoje(
+    *,
+    interaction: discord.Interaction | None = None,
+    ctx=None,
+):
+    """Envia resumo do dia + select de partidas (mesmo fluxo do !hoje)."""
+    msg = None
+    if interaction:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    elif ctx:
+        msg = await ctx.send("📅 Buscando jogos do dia em todas as ligas...")
+
+    loop = asyncio.get_event_loop()
+    jogos_por_liga: dict = {}
+    for chave in LIGAS_RESUMO:
+        try:
+            if chave in LIGAS_COPA:
+                jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
+            else:
+                jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
+            if jogos:
+                jogos_por_liga[chave] = jogos
+        except Exception as e:
+            print(f"[Hoje] Erro em {chave}: {e}")
+
+    if not jogos_por_liga:
+        texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
+        if interaction:
+            await interaction.followup.send(texto)
+        elif msg:
+            await msg.edit(content=texto)
+        return
+
+    total = sum(len(v) for v in jogos_por_liga.values())
+    img   = await gerar_resumo_diario_png(jogos_por_liga)
+    bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
+    view = None
+    if bz_events:
+        opcoes = _build_partida_options(bz_events)
+        if opcoes:
+            view = PartidaSelectView(opcoes, permitir_evento=True)
+
+    content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
+    arquivo = discord.File(img)
+    if interaction:
+        await interaction.followup.send(content=content, file=arquivo, view=view)
+    else:
+        await msg.delete()
+        await ctx.send(content=content, file=arquivo, view=view)
+
+
+async def _responder_calendario_data(
+    data,
+    *,
+    interaction: discord.Interaction | None = None,
+    ctx=None,
+):
+    """Calendário de uma data (imagem + SeguirView se houver jogos ativos)."""
+    data_yyyymmdd = data.strftime("%Y%m%d")
+    data_display  = data.strftime("%d/%m/%Y")
+    msg = None
+    if interaction:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=False)
+    elif ctx:
+        msg = await ctx.send(f"📅 Buscando jogos de **{data_display}**...")
+
+    loop = asyncio.get_event_loop()
+    jogos_por_liga: dict = {}
+    for chave in LIGAS_RESUMO:
+        if chave in LIGAS_COPA:
+            continue
+        try:
+            jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave], data_yyyymmdd)
+            if jogos:
+                jogos_por_liga[chave] = jogos
+        except Exception as e:
+            print(f"[Calendario] Erro em {chave}: {e}")
+
+    if not jogos_por_liga:
+        texto = f"📭 Nenhum jogo em **{data_display}** nas ligas monitoradas."
+        if interaction:
+            await interaction.followup.send(texto)
+        elif msg:
+            await msg.edit(content=texto)
+        return
+
+    total = sum(len(v) for v in jogos_por_liga.values())
+    img   = await gerar_resumo_diario_png(jogos_por_liga, data_display=data_display)
+    jogos_ativos = _flatten_jogos_ativos(jogos_por_liga)
+    view = SeguirView(jogos_ativos, "") if jogos_ativos else None
+    content = f"📅 **Jogos de {data_display}** — {total} partidas em {len(jogos_por_liga)} ligas"
+    arquivo = discord.File(img)
+    if interaction:
+        await interaction.followup.send(content=content, file=arquivo, view=view)
+    else:
+        await msg.delete()
+        await ctx.send(content=content, file=arquivo, view=view)
+
+
+async def _responder_proximos_time(
+    nome_time: str,
+    *,
+    interaction: discord.Interaction | None = None,
+    ctx=None,
+    limite: int = PROXIMOS_PADRAO,
+):
+    limite = _normalizar_limite_proximos(limite)
+    msg = None
+    if interaction:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    elif ctx:
+        msg = await ctx.send(f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**...")
+
+    loop = asyncio.get_event_loop()
+
+    async def _enviar(jogos: list, nome_oficial: str, nome_liga: str):
+        try:
+            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+        except Exception as e:
+            err = f"Erro ao gerar imagem: {e}"
+            if interaction:
+                await interaction.followup.send(err)
+            elif msg:
+                await msg.edit(content=err)
+            return
+        arq = discord.File(caminho)
+        v   = _view_proximos(jogos)
+        if interaction:
+            await interaction.followup.send(file=arq, view=v)
+        else:
+            await msg.delete()
+            await ctx.send(file=arq, view=v)
+
+    eh_selecao = bool(_canonical_selecao(nome_time))
+    if eh_selecao:
+        r = await loop.run_in_executor(
+            None, functools.partial(buscar_proximos_selecao, nome_time, None, limite=limite),
+        )
+        if r:
+            jogos, nome_oficial = r
+            await _enviar(jogos, nome_oficial, "🌍 Seleções")
+            return
+        txt = f"Nenhum jogo futuro para **{nome_time}**."
+        if interaction:
+            await interaction.followup.send(txt)
+        elif msg:
+            await msg.edit(content=txt)
+        return
+
+    bz_result = await loop.run_in_executor(
+        None, functools.partial(buscar_proximos_bzzoiro, nome_time, None, limite=limite),
+    )
+    if bz_result:
+        jogos, nome_oficial = bz_result
+        await _enviar(jogos, nome_oficial, "")
+        return
+
+    txt = f"Nenhum jogo futuro encontrado para **{nome_time}**."
+    if interaction:
+        await interaction.followup.send(txt)
+    elif msg:
+        await msg.edit(content=txt)
+
+
+class SeguirEscolhaTimeView(discord.ui.View):
+    """Escolhe casa ou visitante para seguir (ephemeral)."""
+
+    def __init__(self, times: list[str]):
+        super().__init__(timeout=60)
+        opts = [discord.SelectOption(label=t, value=t) for t in times[:25]]
+        sel = discord.ui.Select(placeholder="Qual time seguir?", options=opts)
+        sel.callback = self._on_pick
+        self.add_item(sel)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        time = interaction.data["values"][0]
+        msg  = await _executar_seguir(interaction.user, time)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=msg, view=self)
+
+
+class SeguirTimeSelectView(discord.ui.View):
+    """Select de times populares para !seguir / menu."""
+
+    def __init__(self, modo: str = "seguir"):
+        super().__init__(timeout=120)
+        self.modo = modo
+        times = _lista_times_menu()
+        if not times:
+            return
+        ph = "⭐ Escolha um time para seguir..." if modo == "seguir" else "📅 Escolha um time (próximos jogos)..."
+        sel = discord.ui.Select(
+            placeholder=ph,
+            options=[discord.SelectOption(label=t, value=t) for t in times],
+            row=0,
+        )
+        sel.callback = self._on_pick
+        self.add_item(sel)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        time = interaction.data["values"][0]
+        if self.modo == "proximos":
+            await interaction.response.defer(ephemeral=True)
+            await _responder_proximos_time(time, interaction=interaction)
+            return
+        msg = await _executar_seguir(interaction.user, time)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=msg, view=self)
+
+
+class MenuLigaSelectView(discord.ui.View):
+    """Select de liga para gerar tabela pelo menu."""
+
+    def __init__(self):
+        super().__init__(timeout=90)
+        opts = [
+            discord.SelectOption(
+                label=f"{LIGAS_META.get(k, {}).get('emoji', '🏆')} {LIGAS_META.get(k, {}).get('nome', k.title())}",
+                value=k,
+            )
+            for k in LIGAS
+            if k not in LIGAS_COPA
+        ][:25]
+        sel = discord.ui.Select(placeholder="📊 Escolha a liga...", options=opts)
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        chave = interaction.data["values"][0]
+        meta  = LIGAS_META.get(chave, {"nome": chave.title(), "emoji": "🏆"})
+        nome  = f"{meta['emoji']} {meta['nome']}"
+        await interaction.response.defer(ephemeral=True)
+        loop  = asyncio.get_event_loop()
+        try:
+            dados = await loop.run_in_executor(None, buscar_tabela_por_chave, chave)
+            if not dados:
+                await interaction.followup.send("❌ Sem dados de classificação para esta liga.")
+                return
+            slug = LIGAS.get(chave, "")
+            if dados["type"] == "groups":
+                img = await gerar_tabela_grupos_png(dados["groups"], meta["nome"], slug=slug)
+            else:
+                img = await gerar_tabela_png(dados["teams"], meta["nome"], slug=slug)
+            await interaction.followup.send(
+                content=f"📊 **{nome}**",
+                file=discord.File(img),
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Erro: `{e}`")
+
+
+class CalendarioDataModal(discord.ui.Modal, title="Data do calendário"):
+    data_input = discord.ui.TextInput(
+        label="Data (dd/mm/aaaa)",
+        placeholder="30/05/2026",
+        max_length=10,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            dt = datetime.strptime(self.data_input.value.strip(), "%d/%m/%Y").date()
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Data inválida. Use `dd/mm/aaaa`.", ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+        await _responder_calendario_data(dt, interaction=interaction)
+
+
+class CalendarioDataView(discord.ui.View):
+    """Hoje / amanhã / outra data — sem digitar comando."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="📅 Hoje", style=discord.ButtonStyle.primary, row=0)
+    async def btn_hoje(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        hoje = datetime.now(tz=BRT).date()
+        await _responder_calendario_data(hoje, interaction=interaction)
+
+    @discord.ui.button(label="📆 Amanhã", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_amanha(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        amanha = datetime.now(tz=BRT).date() + timedelta(days=1)
+        await _responder_calendario_data(amanha, interaction=interaction)
+
+    @discord.ui.button(label="🗓 Outra data", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_outra(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CalendarioDataModal())
+
+
+class MenuPrincipalView(discord.ui.View):
+    """Painel principal — navegação por botões."""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="📅 Jogos de hoje", style=discord.ButtonStyle.primary, row=0)
+    async def btn_hoje(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _responder_jogos_hoje(interaction=interaction)
+
+    @discord.ui.button(label="📊 Tabela", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_tabela(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Escolha a liga:", view=MenuLigaSelectView(), ephemeral=True,
+        )
+
+    @discord.ui.button(label="⭐ Seguir time", style=discord.ButtonStyle.success, row=0)
+    async def btn_seguir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SeguirTimeSelectView(modo="seguir")
+        if not view.children:
+            await interaction.response.send_message(
+                "Lista de times indisponível no momento.", ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Escolha o time (notificações no privado):", view=view, ephemeral=True,
+        )
+
+    @discord.ui.button(label="📋 Meus times", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_seguindo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        times = _SEGUINDO.get(str(interaction.user.id), {}).get("times", [])
+        if not times:
+            await interaction.response.send_message(
+                "📭 Você não segue nenhum time. Use **⭐ Seguir time** para começar.",
+                ephemeral=True,
+            )
+            return
+        lista = "\n".join(f"• {t}" for t in times)
+        embed = discord.Embed(
+            title="⭐ Times que você segue",
+            description=lista,
+            color=0xF59E0B,
+        )
+        embed.set_footer(text="Selecione abaixo para deixar de seguir")
+        await interaction.response.send_message(
+            embed=embed, view=SeguindoView(interaction.user.id, times), ephemeral=True,
+        )
+
+    @discord.ui.button(label="🔜 Próximos jogos", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_proximos(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SeguirTimeSelectView(modo="proximos")
+        if not view.children:
+            await interaction.response.send_message(
+                "Lista de times indisponível.", ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Escolha o time:", view=view, ephemeral=True,
+        )
+
+    @discord.ui.button(label="🗓 Calendário", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_calendario(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "📅 **Calendário** — escolha a data:",
+            view=CalendarioDataView(),
+            ephemeral=True,
+        )
+
+
+def _embed_menu() -> discord.Embed:
+    embed = discord.Embed(
+        title="⚽ Football Bot — Menu",
+        description=(
+            "Use os **botões** abaixo — quase não precisa digitar.\n\n"
+            "Atalhos rápidos: `!menu` · `/menu` · `!hoje` · `/hoje` · `!seguindo`"
+        ),
+        color=0x3B82F6,
+    )
+    embed.add_field(
+        name="Dica",
+        value="Comandos `/` no Discord têm **autocomplete** (liga, time).",
+        inline=False,
+    )
+    return embed
+
+
+# ==========================================
 # COMANDOS
 # ==========================================
+
+@bot.command(name="menu")
+async def cmd_menu(ctx):
+    """Painel interativo — navegação por botões."""
+    await ctx.send(embed=_embed_menu(), view=MenuPrincipalView())
+
 
 @bot.command(name="tabela")
 async def cmd_tabela(ctx, *, nome_liga: str = "brasileirao"):
@@ -4564,148 +5028,55 @@ _register_liga_commands()
 
 @bot.command(name="hoje")
 async def cmd_hoje(ctx):
-    msg = await ctx.send("📅 Buscando jogos do dia em todas as ligas...")
-    loop = asyncio.get_event_loop()
-    jogos_por_liga = {}
-    for chave in LIGAS_RESUMO:
-        try:
-            if chave in LIGAS_COPA:
-                jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
-            else:
-                jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
-            if jogos:
-                jogos_por_liga[chave] = jogos
-        except Exception as e:
-            print(f"[!hoje] Erro em {chave}: {e}")
-
-    await msg.delete()
-
-    if not jogos_por_liga:
-        await ctx.send("📭 Nenhum jogo encontrado hoje em nenhuma liga.")
-        return
-
-    total = sum(len(v) for v in jogos_por_liga.values())
-    img   = await gerar_resumo_diario_png(jogos_por_liga)
-
-    # Select Menu: partidas com detalhes via Bzzoiro
-    bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
-    view      = None
-    if bz_events:
-        opcoes = _build_partida_options(bz_events)
-        if opcoes:
-            view = PartidaSelectView(opcoes, permitir_evento=True)
-
-    await ctx.send(
-        content=f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas",
-        file=discord.File(img),
-        view=view,
-    )
+    await _responder_jogos_hoje(ctx=ctx)
 
 
 @bot.command(name="calendario")
 async def cmd_calendario(ctx, data_str: str = None):
     if not data_str:
-        await ctx.send("Uso: `!calendario dd/mm/yyyy`\nEx: `!calendario 01/06/2026`")
+        await ctx.send(
+            "📅 **Calendário** — escolha a data:",
+            view=CalendarioDataView(),
+        )
         return
-
     try:
-        dt = datetime.strptime(data_str, "%d/%m/%Y")
+        dt = datetime.strptime(data_str.strip(), "%d/%m/%Y").date()
     except ValueError:
-        await ctx.send("❌ Data inválida. Use o formato `dd/mm/yyyy`. Ex: `!calendario 01/06/2026`")
+        await ctx.send("❌ Data inválida. Use `dd/mm/aaaa` ou só `!calendario` para os botões.")
         return
-
-    data_yyyymmdd = dt.strftime("%Y%m%d")
-    data_display  = dt.strftime("%d/%m/%Y")
-
-    msg = await ctx.send(f"📅 Buscando jogos de **{data_display}**...")
-    loop = asyncio.get_event_loop()
-    jogos_por_liga = {}
-    for chave in LIGAS_RESUMO:
-        if chave in LIGAS_COPA:
-            continue  # Copa do Brasil não suporta consulta por data via ESPN
-        try:
-            jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave], data_yyyymmdd)
-            if jogos:
-                jogos_por_liga[chave] = jogos
-        except Exception as e:
-            print(f"[!calendario] Erro em {chave}: {e}")
-
-    await msg.delete()
-
-    if not jogos_por_liga:
-        await ctx.send(f"📭 Nenhum jogo encontrado em **{data_display}** nas ligas monitoradas.")
-        return
-
-    total = sum(len(v) for v in jogos_por_liga.values())
-    img   = await gerar_resumo_diario_png(jogos_por_liga, data_display=data_display)
-    jogos_ativos = _flatten_jogos_ativos(jogos_por_liga)
-    view = SeguirView(jogos_ativos, "") if jogos_ativos else None
-    await ctx.send(
-        content=f"📅 **Jogos de {data_display}** — {total} partidas em {len(jogos_por_liga)} ligas",
-        file=discord.File(img),
-        view=view,
-    )
+    await _responder_calendario_data(dt, ctx=ctx)
 
 
 @bot.command(name="seguir")
 async def cmd_seguir(ctx, *, time: str = ""):
     """Segue um time: recebe notícias e alertas de jogos ao vivo no privado."""
     if not time:
-        await ctx.send(
-            "**Uso:** `!seguir <nome do time>`\n"
-            "Ex: `!seguir Flamengo` ou `!seguir Atlético Mineiro`\n"
-            "Você receberá notícias e alertas de gols no privado."
-        )
+        view = SeguirTimeSelectView(modo="seguir")
+        if view.children:
+            await ctx.send(
+                "⭐ **Seguir time** — escolha na lista (ou use `!seguir Flamengo`):",
+                view=view,
+            )
+        else:
+            await ctx.send(
+                "**Uso:** `!seguir` (menu) ou `!seguir Flamengo`\n"
+                "Também: `!menu` → **⭐ Seguir time**"
+            )
         return
-    time = time.strip()
-    uid_str = str(ctx.author.id)
-    if uid_str not in _SEGUINDO:
-        _SEGUINDO[uid_str] = {"times": [], "noticias_vistas": {}}
-    dados = _SEGUINDO[uid_str]
-
-    if any(_strip_accents(t.lower()) == _strip_accents(time.lower())
-           for t in dados.get("times", [])):
-        await ctx.send(f"📌 Você já segue **{time}**. Use `!seguindo` para ver sua lista.")
-        return
-
-    dados.setdefault("times", []).append(time)
-    _salvar_seguindo(_SEGUINDO)
-
-    dm_ok = False
-    try:
-        await ctx.author.send(
-            f"⭐ **Você está seguindo {time}!**\n"
-            f"Você receberá aqui:\n"
-            f"• 📰 Notícias e novidades\n"
-            f"• ⚽ Alertas quando o jogo começar\n"
-            f"• 🥅 Gols e eventos importantes\n"
-            f"• 🏁 Resultado final\n\n"
-            f"Use `!deixar {time}` para parar de seguir."
-        )
-        dm_ok = True
-    except discord.Forbidden:
-        pass
-
+    msg = await _executar_seguir(ctx.author, time.strip())
     if ctx.guild:
         try:
             await ctx.message.delete()
         except Exception:
             pass
-        if dm_ok:
-            await ctx.send(f"✅ Seguindo **{time}**! Confirmação enviada no privado.", delete_after=8)
-        else:
-            await ctx.send(
-                f"✅ Seguindo **{time}**!\n"
-                f"⚠️ Não foi possível enviar DM. Ative mensagens diretas deste servidor "
-                f"em Configurações > Privacidade."
-            )
+    await ctx.send(msg, delete_after=12 if "privado" in msg else None)
 
 
 @bot.command(name="deixar")
 async def cmd_deixar(ctx, *, time: str = ""):
     """Para de seguir um time."""
     if not time:
-        await ctx.send("**Uso:** `!deixar <nome do time>`\nEx: `!deixar Flamengo`")
+        await ctx.invoke(bot.get_command("seguindo"))
         return
     time    = time.strip()
     uid_str = str(ctx.author.id)
@@ -5008,16 +5379,20 @@ async def cmd_chaveamento(ctx, *, nome_liga: str = "champions"):
 def _build_ajuda_embed() -> discord.Embed:
     embed = discord.Embed(
         title="⚽ Football Bot — Comandos",
-        description="Use `!comando` ou `/comando` (slash). Os principais comandos têm autocomplete no Discord.",
+        description=(
+            "🎛 **`!menu`** ou **`/menu`** — painel com botões (recomendado, quase sem digitar).\n"
+            "Também: `!comando` ou `/comando` com autocomplete."
+        ),
         color=0x3B82F6,
     )
     embed.add_field(
         name="📅  Jogos do Dia",
         value=(
-            "`!hoje` `/hoje` — Jogos do dia em todas as ligas\n"
+            "`!menu` `/menu` — Painel interativo (botões)\n"
+            "`!hoje` `/hoje` — Jogos do dia + select de partidas\n"
             "`!brasileirao` `!premierleague` `!champions` … — Jogos da liga hoje\n"
             "`!brasileirao 01/06/2026` — Jogos da liga em uma data específica\n"
-            "`!calendario 01/06/2026` — Jogos de todas as ligas + select (Detalhes / Player / Evento)"
+            "`!calendario` — Botões **Hoje / Amanhã / Outra data** (+ select de jogos)"
         ),
         inline=False,
     )
@@ -5045,9 +5420,9 @@ def _build_ajuda_embed() -> discord.Embed:
     embed.add_field(
         name="🔔  Seguir Times (DM privada)",
         value=(
-            "`!seguir <time>` — Seguir um time (notícias + alertas de jogos no privado)\n"
-            "`!deixar <time>` — Parar de seguir\n"
-            "`!seguindo` — Ver lista de times seguidos"
+            "`!seguir` — Menu para escolher o time (ou `!seguir Flamengo`)\n"
+            "`/seguir` — Mesmo com autocomplete de time\n"
+            "`!deixar` ou `!seguindo` — Parar de seguir (select)"
         ),
         inline=False,
     )
@@ -5615,6 +5990,7 @@ class PartidaSelectView(discord.ui.View):
         self.permitir_evento = permitir_evento
         self.selected_jogo: dict | None = None
         self.selected_slug: str = ""
+        self._times_seguir: list[str] = []
 
         sel = discord.ui.Select(
             placeholder="🔍 Ver detalhes de uma partida...",
@@ -5623,6 +5999,13 @@ class PartidaSelectView(discord.ui.View):
         )
         sel.callback = self._on_select
         self.add_item(sel)
+
+        self.btn_seguir = discord.ui.Button(
+            label="⭐ Seguir", style=discord.ButtonStyle.success,
+            disabled=True, row=1,
+        )
+        self.btn_seguir.callback = self._on_seguir_time
+        self.add_item(self.btn_seguir)
 
         if permitir_evento:
             self.btn_evento = discord.ui.Button(
@@ -5661,6 +6044,9 @@ class PartidaSelectView(discord.ui.View):
                 if player_url:
                     partes.append(f"📺 **Player ao vivo:** {player_url}")
 
+            self._times_seguir = [nome_casa, nome_fora]
+            self.btn_seguir.disabled = False
+
             # Habilita o botão de criar evento para a partida selecionada
             if self.permitir_evento and status != "finished":
                 logo_map = await loop.run_in_executor(None, _buscar_logos_brasileiros)
@@ -5668,10 +6054,10 @@ class PartidaSelectView(discord.ui.View):
                 self.selected_slug = self.selected_jogo.get("_slug", "")
                 self.btn_evento.disabled = False
                 self.btn_evento.label    = "📅 Criar Evento"
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
 
             await interaction.edit_original_response(content="\n".join(partes))
         except Exception as e:
@@ -5698,6 +6084,18 @@ class PartidaSelectView(discord.ui.View):
             self.btn_evento.label    = "📅 Criar Evento"
         await interaction.message.edit(view=self)
         await interaction.followup.send(msg, ephemeral=True)
+
+    async def _on_seguir_time(self, interaction: discord.Interaction):
+        if not self._times_seguir:
+            await interaction.response.send_message(
+                "Selecione uma partida primeiro.", ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Qual time seguir?",
+            view=SeguirEscolhaTimeView(self._times_seguir),
+            ephemeral=True,
+        )
 
     async def _gerar_player_url(self, loop, ev: dict, eid: int,
                                 nome_casa: str, nome_fora: str) -> str | None:
@@ -5842,33 +6240,33 @@ async def slash_ajuda(interaction: discord.Interaction):
     await interaction.response.send_message(embed=_build_ajuda_embed())
 
 
+@bot.tree.command(name="menu", description="Painel interativo — navegue por botões")
+async def slash_menu(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=_embed_menu(), view=MenuPrincipalView())
+
+
+@bot.tree.command(name="seguir", description="Seguir um time (notificações no privado)")
+@discord.app_commands.describe(time="Nome do time (opcional — abre menu se vazio)")
+@discord.app_commands.autocomplete(time=_time_autocomplete)
+async def slash_seguir(interaction: discord.Interaction, time: str = ""):
+    if not time.strip():
+        view = SeguirTimeSelectView(modo="seguir")
+        if view.children:
+            await interaction.response.send_message(
+                "⭐ Escolha o time:", view=view, ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "Informe o time ou use `!menu`.", ephemeral=True,
+            )
+        return
+    msg = await _executar_seguir(interaction.user, time.strip())
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
 @bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
 async def slash_hoje(interaction: discord.Interaction):
-    await interaction.response.defer()
-    loop = asyncio.get_event_loop()
-    jogos_por_liga: dict = {}
-    for chave in LIGAS_RESUMO:
-        try:
-            if chave in LIGAS_COPA:
-                jogos = await loop.run_in_executor(None, buscar_jogos_copa_hoje)
-            else:
-                jogos = await loop.run_in_executor(None, buscar_jogos_do_dia, LIGAS[chave])
-            if jogos:
-                jogos_por_liga[chave] = jogos
-        except Exception as e:
-            print(f"[/hoje] Erro em {chave}: {e}")
-    if not jogos_por_liga:
-        await interaction.followup.send("📭 Nenhum jogo encontrado hoje em nenhuma liga.")
-        return
-    total = sum(len(v) for v in jogos_por_liga.values())
-    try:
-        img = await gerar_resumo_diario_png(jogos_por_liga)
-        await interaction.followup.send(
-            content=f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas",
-            file=discord.File(img),
-        )
-    except Exception as e:
-        await interaction.followup.send(f"Erro ao gerar imagem: {e}")
+    await _responder_jogos_hoje(interaction=interaction)
 
 
 @bot.tree.command(name="tabela", description="Classificação de uma liga")
