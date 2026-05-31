@@ -12,7 +12,7 @@ import discord
 from discord.ext import commands, tasks
 import requests
 import aiohttp
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from urllib.parse import quote as url_quote
 from playwright.async_api import async_playwright
 from aiohttp import web as aiohttp_web
@@ -3357,6 +3357,9 @@ async def on_ready():
         print(f"Slash commands sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Erro ao sincronizar slash commands: {e}")
+    if BZZOIRO_TOKEN:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _bz_build_team_map)
     await _publicar_menu_canal()
 
 
@@ -3843,7 +3846,7 @@ async def lembrete_pre_jogo():
         return
     agora = datetime.now(tz=BRT)
     loop  = asyncio.get_event_loop()
-    eventos = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
+    eventos = await loop.run_in_executor(None, eventos_hoje_bzzoiro_todos)
     salvar  = False
     for uid_str, dados in list(_SEGUINDO.items()):
         if not _prefs_de(dados).get("lembrete", True):
@@ -3873,11 +3876,13 @@ async def lembrete_pre_jogo():
             delta_min = (kick - agora).total_seconds() / 60
             if not (LEMBRETE_MIN_ANTES <= delta_min <= LEMBRETE_MAX_ANTES):
                 continue
+            liga = _BZ_LEAGUE_NAMES.get(ev.get("league_id") or 0, "")
+            liga_txt = f"\n🏆 {liga}" if liga else ""
             try:
                 user = await bot.fetch_user(int(uid_str))
                 await user.send(
                     f"⏰ **Lembrete** — jogo em ~{int(delta_min)} min\n"
-                    f"**{home} × {away}**\n"
+                    f"**{home} × {away}**{liga_txt}\n"
                     f"🕐 {kick.strftime('%H:%M')} (horário de Brasília)"
                 )
             except Exception:
@@ -4375,19 +4380,10 @@ class SeguindoView(discord.ui.View):
         if not time_sel:
             await interaction.response.send_message("Selecione um time primeiro.", ephemeral=True)
             return
-        uid_str = str(self.uid)
-        if uid_str in _SEGUINDO:
-            times_list = _SEGUINDO[uid_str].get("times", [])
-            match = next((t for t in times_list
-                          if _strip_accents(t.lower()) == _strip_accents(time_sel.lower())), None)
-            if match:
-                times_list.remove(match)
-                _salvar_seguindo(_SEGUINDO)
+        msg = _executar_deixar(interaction.user, time_sel)
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(
-            content=f"✅ Você deixou de seguir **{time_sel}**.", view=None,
-        )
+        await interaction.response.edit_message(content=msg, view=None)
 
 
 def _flatten_jogos_ativos(jogos_por_liga: dict) -> list:
@@ -4817,6 +4813,67 @@ async def _executar_seguir(user: discord.abc.User, time: str) -> str:
         )
 
 
+def _executar_deixar(user: discord.abc.User, time: str) -> str:
+    """Remove time da lista seguida. Retorna mensagem para o usuário."""
+    time = (time or "").strip()
+    if not time:
+        return "❌ Informe o nome do time."
+    busca = time
+    if BZZOIRO_TOKEN:
+        resolvido = _bz_resolve_team(time)
+        if resolvido:
+            _, busca = resolvido
+    uid_str = str(user.id)
+    dados   = _SEGUINDO.get(uid_str, {})
+    times   = dados.get("times", [])
+    match   = next(
+        (t for t in times if _strip_accents(t.lower()) == _strip_accents(busca.lower())),
+        None,
+    )
+    if not match:
+        match = next(
+            (t for t in times if _time_match(busca, t) or _time_match(time, t)),
+            None,
+        )
+    if not match:
+        return f"❌ Você não está seguindo **{time}**. Use `!seguindo` ou `/deixar`."
+    times.remove(match)
+    _salvar_seguindo(_SEGUINDO)
+    return f"✅ Você deixou de seguir **{match}**."
+
+
+async def _responder_seguindo(
+    user: discord.abc.User,
+    *,
+    interaction: discord.Interaction | None = None,
+    ctx=None,
+):
+    """Lista times seguidos com view para deixar de seguir."""
+    times = _SEGUINDO.get(str(user.id), {}).get("times", [])
+    if not times:
+        texto = (
+            "📭 Você não segue nenhum time ainda.\n"
+            "Use `!seguir <time>` ou `/seguir` para começar."
+        )
+        if interaction:
+            await interaction.response.send_message(texto, ephemeral=True)
+        elif ctx:
+            await ctx.send(texto)
+        return
+    lista = "\n".join(f"• {t}" for t in times)
+    embed = discord.Embed(
+        title="⭐ Times que você segue",
+        description=lista,
+        color=0x22C55E,
+    )
+    embed.set_footer(text=f"{len(times)} time(s) · !deixar <time> · /deixar")
+    view = SeguindoView(user.id, times)
+    if interaction:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    elif ctx:
+        await ctx.send(embed=embed, view=view)
+
+
 async def _responder_jogos_hoje(
     *,
     interaction: discord.Interaction | None = None,
@@ -5151,23 +5208,7 @@ class MenuPrincipalView(discord.ui.View):
         custom_id="futebola:menu:seguindo",
     )
     async def btn_seguindo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        times = _SEGUINDO.get(str(interaction.user.id), {}).get("times", [])
-        if not times:
-            await interaction.response.send_message(
-                "📭 Você não segue nenhum time. Use **⭐ Seguir time** para começar.",
-                ephemeral=True,
-            )
-            return
-        lista = "\n".join(f"• {t}" for t in times)
-        embed = discord.Embed(
-            title="⭐ Times que você segue",
-            description=lista,
-            color=0xF59E0B,
-        )
-        embed.set_footer(text="Selecione abaixo para deixar de seguir")
-        await interaction.response.send_message(
-            embed=embed, view=SeguindoView(interaction.user.id, times), ephemeral=True,
-        )
+        await _responder_seguindo(interaction.user, interaction=interaction)
 
     @discord.ui.button(
         label="🔜 Próximos jogos", style=discord.ButtonStyle.secondary, row=1,
@@ -5239,8 +5280,25 @@ def _salvar_menu_canal(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+async def _limpar_menus_duplicados(canal: discord.TextChannel, manter_id: int) -> None:
+    """Remove painéis antigos do bot no canal, exceto a mensagem oficial."""
+    try:
+        async for msg in canal.history(limit=50):
+            if msg.id == manter_id or msg.author.id != bot.user.id or not msg.embeds:
+                continue
+            titulo = msg.embeds[0].title or ""
+            if "Football Bot" in titulo and "Menu" in titulo:
+                try:
+                    await msg.delete()
+                    print(f"[Menu] Painel duplicado removido (msg {msg.id})")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[Menu] Erro ao limpar duplicados: {e}")
+
+
 async def _publicar_menu_canal():
-    """Publica ou atualiza o menu fixo no canal CANAL_COMANDOS."""
+    """Publica ou atualiza o menu fixo no canal CANAL_COMANDOS (sempre no on_ready)."""
     if not CANAL_COMANDOS_ID:
         print("[Menu] CANAL_COMANDOS não configurado — painel fixo desativado.")
         return
@@ -5258,39 +5316,47 @@ async def _publicar_menu_canal():
     view  = MenuPrincipalView(persistent=True)
     embed = _embed_menu(fixo=True)
     meta  = _carregar_menu_canal()
+    msg_id_oficial: int | None = None
 
     if meta.get("channel_id") == CANAL_COMANDOS_ID and meta.get("message_id"):
         try:
             msg = await canal.fetch_message(int(meta["message_id"]))
             await msg.edit(embed=embed, view=view)
+            msg_id_oficial = msg.id
             print(f"[Menu] Painel atualizado (#{canal.name}, msg {msg.id})")
-            return
         except discord.NotFound:
             pass
         except Exception as e:
             print(f"[Menu] Erro ao editar msg {meta.get('message_id')}: {e}")
 
-    try:
-        async for msg in canal.history(limit=40):
-            if msg.author.id != bot.user.id or not msg.embeds:
-                continue
-            titulo = msg.embeds[0].title or ""
-            if "Football Bot" in titulo and "Menu" in titulo:
-                await msg.edit(embed=embed, view=view)
-                _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
-                print(f"[Menu] Painel reutilizado (#{canal.name}, msg {msg.id})")
-                return
-    except discord.Forbidden:
-        print(f"[Menu] Sem permissão de ler histórico em #{canal.name}")
-    except Exception as e:
-        print(f"[Menu] Erro ao buscar histórico: {e}")
+    if msg_id_oficial is None:
+        try:
+            async for msg in canal.history(limit=40):
+                if msg.author.id != bot.user.id or not msg.embeds:
+                    continue
+                titulo = msg.embeds[0].title or ""
+                if "Football Bot" in titulo and "Menu" in titulo:
+                    await msg.edit(embed=embed, view=view)
+                    msg_id_oficial = msg.id
+                    _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
+                    print(f"[Menu] Painel reutilizado (#{canal.name}, msg {msg.id})")
+                    break
+        except discord.Forbidden:
+            print(f"[Menu] Sem permissão de ler histórico em #{canal.name}")
+        except Exception as e:
+            print(f"[Menu] Erro ao buscar histórico: {e}")
 
-    try:
-        msg = await canal.send(embed=embed, view=view)
-        _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
-        print(f"[Menu] Novo painel publicado (#{canal.name}, msg {msg.id})")
-    except Exception as e:
-        print(f"[Menu] Erro ao enviar painel: {e}")
+    if msg_id_oficial is None:
+        try:
+            msg = await canal.send(embed=embed, view=view)
+            msg_id_oficial = msg.id
+            _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
+            print(f"[Menu] Novo painel publicado (#{canal.name}, msg {msg.id})")
+        except Exception as e:
+            print(f"[Menu] Erro ao enviar painel: {e}")
+            return
+
+    await _limpar_menus_duplicados(canal, msg_id_oficial)
 
 
 # ==========================================
@@ -5458,43 +5524,15 @@ async def cmd_notificacoes(ctx, tipo: str = None, estado: str = None):
 async def cmd_deixar(ctx, *, time: str = ""):
     """Para de seguir um time."""
     if not time:
-        await ctx.invoke(bot.get_command("seguindo"))
+        await _responder_seguindo(ctx.author, ctx=ctx)
         return
-    time    = time.strip()
-    uid_str = str(ctx.author.id)
-    dados   = _SEGUINDO.get(uid_str, {})
-    times   = dados.get("times", [])
-    match   = next(
-        (t for t in times if _strip_accents(t.lower()) == _strip_accents(time.lower())),
-        None,
-    )
-    if not match:
-        await ctx.send(f"❌ Você não está seguindo **{time}**. Use `!seguindo` para ver sua lista.")
-        return
-    times.remove(match)
-    _salvar_seguindo(_SEGUINDO)
-    await ctx.send(f"✅ Você deixou de seguir **{match}**.")
+    await ctx.send(_executar_deixar(ctx.author, time.strip()))
 
 
 @bot.command(name="seguindo")
 async def cmd_seguindo(ctx):
     """Lista os times que você está seguindo."""
-    uid_str = str(ctx.author.id)
-    times   = _SEGUINDO.get(uid_str, {}).get("times", [])
-    if not times:
-        await ctx.send(
-            "📭 Você não segue nenhum time ainda.\n"
-            "Use `!seguir <time>` para começar. Ex: `!seguir Flamengo`"
-        )
-        return
-    lista  = "\n".join(f"• {t}" for t in times)
-    embed  = discord.Embed(
-        title="⭐ Times que você segue",
-        description=lista,
-        color=0x22C55E,
-    )
-    embed.set_footer(text=f"{len(times)} time(s) · !deixar <time> para parar · notificações chegam no privado")
-    await ctx.send(embed=embed, view=SeguindoView(ctx.author.id, times))
+    await _responder_seguindo(ctx.author, ctx=ctx)
 
 
 @bot.command(name="parar")
@@ -5805,7 +5843,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!seguir` — Menu para escolher o time (nome validado via Bzzoiro)\n"
             "`/seguir` — Mesmo com autocomplete de time\n"
             "`!notificacoes` `/notificacoes` — Ligar/desligar notícias, jogos ou lembrete\n"
-            "`!deixar` ou `!seguindo` — Parar de seguir (select)"
+            "`!deixar` `/deixar` ou `!seguindo` — Parar de seguir (select ou autocomplete)"
         ),
         inline=False,
     )
@@ -6272,15 +6310,42 @@ def _build_historico_options(events: list[dict]) -> list[discord.SelectOption]:
     return opts[:25]
 
 
-def buscar_eventos_hoje_bzzoiro() -> list[dict]:
-    """Retorna todos os eventos Bzzoiro de hoje em BRT (Brasileirão, Copa do Brasil, Libertadores, Sul-Americana).
+def _filtrar_eventos_data_brt(eventos: list[dict], dia: date | None = None) -> list[dict]:
+    """Mantém só eventos cuja data do apito cai no dia informado (BRT)."""
+    dia = dia or datetime.now(tz=BRT).date()
+    out: list[dict] = []
+    vistos: set = set()
+    for ev in eventos:
+        eid = ev.get("id")
+        if eid in vistos:
+            continue
+        try:
+            ev_brt = datetime.fromisoformat(
+                (ev.get("event_date") or "").replace("Z", "+00:00")
+            ).astimezone(BRT).date()
+        except Exception:
+            ev_brt = dia
+        if ev_brt == dia:
+            vistos.add(eid)
+            out.append(ev)
+    return out
 
-    Bzzoiro armazena datas em UTC, então consultamos hoje+1 dia e filtramos em Python por data BRT,
-    evitando que jogos noturnos de ontem (00:30 UTC = 21:30 BRT ontem) apareçam como hoje.
-    """
-    hoje     = datetime.now(tz=BRT).date()
-    amanha   = hoje + timedelta(days=1)
-    events: list[dict] = []
+
+def eventos_hoje_bzzoiro_todos() -> list[dict]:
+    """Eventos de hoje (BRT) em todas as ligas Bzzoiro — uma consulta ampla."""
+    hoje   = datetime.now(tz=BRT).date()
+    amanha = hoje + timedelta(days=1)
+    data   = _bzzoiro_get(
+        "events/", {"date_from": str(hoje), "date_to": str(amanha), "limit": 300}
+    )
+    return _filtrar_eventos_data_brt((data or {}).get("results", []), hoje)
+
+
+def buscar_eventos_hoje_bzzoiro() -> list[dict]:
+    """Eventos de hoje (BRT) nas ligas principais do bot (select / calendário)."""
+    hoje   = datetime.now(tz=BRT).date()
+    amanha = hoje + timedelta(days=1)
+    brutos: list[dict] = []
     leagues = [
         (_BZ_BRASILEIRAO_LEAGUE,  {}),
         (_BZ_COPA_LEAGUE,         {"season_id": _BZ_COPA_SEASON}),
@@ -6291,17 +6356,8 @@ def buscar_eventos_hoje_bzzoiro() -> list[dict]:
         params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(amanha), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
-        for ev in (data or {}).get("results", []):
-            # Filtra apenas eventos cuja data em BRT é hoje
-            try:
-                ev_brt = datetime.fromisoformat(
-                    (ev.get("event_date") or "").replace("Z", "+00:00")
-                ).astimezone(BRT).date()
-            except Exception:
-                ev_brt = hoje  # mantém se não conseguir parsear
-            if ev_brt == hoje:
-                events.append(ev)
-    return events
+        brutos.extend((data or {}).get("results", []))
+    return _filtrar_eventos_data_brt(brutos, hoje)
 
 
 def _bz_resolve_team(nome_time: str) -> tuple[int, str] | None:
@@ -6610,6 +6666,19 @@ async def _liga_sem_copa_autocomplete(
     ][:25]
 
 
+async def _times_seguidos_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[discord.app_commands.Choice[str]]:
+    times = _SEGUINDO.get(str(interaction.user.id), {}).get("times", [])
+    busca = (current or "").lower()
+    return [
+        discord.app_commands.Choice(name=t[:100], value=t)
+        for t in times
+        if not busca or busca in t.lower()
+    ][:25]
+
+
 async def _time_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[discord.app_commands.Choice[str]]:
@@ -6653,6 +6722,22 @@ async def slash_seguir(interaction: discord.Interaction, time: str = ""):
         return
     msg = await _executar_seguir(interaction.user, time.strip())
     await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="deixar", description="Deixar de seguir um time")
+@discord.app_commands.describe(time="Time (vazio = lista com select)")
+@discord.app_commands.autocomplete(time=_times_seguidos_autocomplete)
+async def slash_deixar(interaction: discord.Interaction, time: str = ""):
+    if not time.strip():
+        await _responder_seguindo(interaction.user, interaction=interaction)
+        return
+    msg = _executar_deixar(interaction.user, time.strip())
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="seguindo", description="Times que você segue")
+async def slash_seguindo(interaction: discord.Interaction):
+    await _responder_seguindo(interaction.user, interaction=interaction)
 
 
 @bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
