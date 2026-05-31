@@ -2341,10 +2341,19 @@ _SEASON_SLUG_DISPLAY: dict[str, str] = {
     "round-of-16":              "Oitavas de Final",
     "quarterfinals":            "Quartas de Final",
     "quarter-finals":           "Quartas de Final",
-    "semifinals":               "Semifinals",
-    "semi-finals":              "Semifinals",
+    "semifinals":               "Semifinais",
+    "semi-finals":              "Semifinais",
     "final":                    "Final",
+    # CONMEBOL Libertadores / Sul-Americana (ESPN não expõe /bracket — só scoreboard)
+    "first-stage":              "Primeira Fase",
+    "second-stage":             "Oitavas de Final",
+    "third-stage":              "Quartas de Final",
+    "fourth-stage":             "Semifinais",
 }
+# Fases de pontos corridos — não entram no bracket mata-mata
+_BRACKET_SKIP_SLUGS = frozenset({
+    "group-stage", "league-stage", "regular-season", "group",
+})
 
 
 def _round_sort_key(name: str) -> int:
@@ -2440,13 +2449,19 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
         notes       = comp.get("notes") or []
         # Preferir season.slug (ESPN guarda o nome da fase aí, ex: 'round-of-16')
         season_slug = (ev.get("season") or {}).get("slug", "")
+        if season_slug in _BRACKET_SKIP_SLUGS:
+            continue
         if season_slug and season_slug in _SEASON_SLUG_DISPLAY:
             round_name = _SEASON_SLUG_DISPLAY[season_slug]
         else:
             raw_name   = ((notes[0].get("headline", "") if notes else "")
                           or (ev.get("week") or {}).get("displayValue", "")
-                          or "Rodada")
-            round_name = _normalize_round_name(raw_name)
+                          or "")
+            raw_name   = _normalize_round_name(raw_name)
+            # Ida/volta sem slug de fase: ignora (evita centenas de "2nd Leg - ..." soltos)
+            if not raw_name or re.search(r"(?i)\b(leg|ida|volta)\b", raw_name):
+                continue
+            round_name = raw_name
         competitors = comp.get("competitors") or []
         home  = next((c for c in competitors if c.get("homeAway") == "home"), {})
         away  = next((c for c in competitors if c.get("homeAway") == "away"), {})
@@ -2538,8 +2553,8 @@ def buscar_chaveamento(slug: str) -> list | None:
             )
             if rounds_raw:
                 parsed = _parsear_bracket_rounds(rounds_raw)
-                # Só usa bracket API se retornou chaveamento completo (≥3 rodadas)
-                if parsed and len(parsed) >= 3:
+                # Só usa bracket API se retornou chaveamento útil (≥2 rodadas)
+                if parsed and len(parsed) >= 2:
                     return parsed
 
     # 2. Fallback: scoreboard de período amplo (cobrindo toda fase mata-mata)
