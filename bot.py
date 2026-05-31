@@ -21,6 +21,7 @@ load_dotenv()
 TOKEN_DO_DISCORD  = os.getenv("TOKEN_DISCORD")
 CANAL_RESUMO_ID   = int(os.getenv("CANAL_JOGOS_DO_DIA", "0"))
 CANAL_EVENTO_ID   = int(os.getenv("CANAL_EVENTO", "1510344579927249017"))
+CANAL_COMANDOS_ID = int(os.getenv("CANAL_COMANDOS", "0"))
 # Railway injeta PORT automaticamente; localmente usa SERVER_PORT ou 8080
 SERVER_PORT       = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
 SERVER_URL        = os.getenv("SERVER_URL", f"http://localhost:{SERVER_PORT}")
@@ -3290,6 +3291,7 @@ async def _iniciar_servidor_web():
 
 class FootballBot(commands.Bot):
     async def setup_hook(self):
+        self.add_view(MenuPrincipalView(persistent=True))
         await _iniciar_servidor_web()
         checar_jogos_ao_vivo.start()
         atualizar_players.start()
@@ -3315,6 +3317,7 @@ async def on_ready():
         print(f"Slash commands sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Erro ao sincronizar slash commands: {e}")
+    await _publicar_menu_canal()
 
 
 # ==========================================
@@ -4833,22 +4836,34 @@ class CalendarioDataView(discord.ui.View):
 
 
 class MenuPrincipalView(discord.ui.View):
-    """Painel principal — navegação por botões."""
+    """Painel principal — navegação por botões.
 
-    def __init__(self):
-        super().__init__(timeout=300)
+    persistent=True: timeout=None + custom_id (canal fixo, sobrevive restart).
+    """
 
-    @discord.ui.button(label="📅 Jogos de hoje", style=discord.ButtonStyle.primary, row=0)
+    def __init__(self, *, persistent: bool = False):
+        super().__init__(timeout=None if persistent else 300)
+
+    @discord.ui.button(
+        label="📅 Jogos de hoje", style=discord.ButtonStyle.primary, row=0,
+        custom_id="futebola:menu:hoje",
+    )
     async def btn_hoje(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _responder_jogos_hoje(interaction=interaction)
 
-    @discord.ui.button(label="📊 Tabela", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(
+        label="📊 Tabela", style=discord.ButtonStyle.secondary, row=0,
+        custom_id="futebola:menu:tabela",
+    )
     async def btn_tabela(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "Escolha a liga:", view=MenuLigaSelectView(), ephemeral=True,
         )
 
-    @discord.ui.button(label="⭐ Seguir time", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(
+        label="⭐ Seguir time", style=discord.ButtonStyle.success, row=0,
+        custom_id="futebola:menu:seguir",
+    )
     async def btn_seguir(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = SeguirTimeSelectView(modo="seguir")
         if not view.children:
@@ -4860,7 +4875,10 @@ class MenuPrincipalView(discord.ui.View):
             "Escolha o time (notificações no privado):", view=view, ephemeral=True,
         )
 
-    @discord.ui.button(label="📋 Meus times", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="📋 Meus times", style=discord.ButtonStyle.secondary, row=1,
+        custom_id="futebola:menu:seguindo",
+    )
     async def btn_seguindo(self, interaction: discord.Interaction, button: discord.ui.Button):
         times = _SEGUINDO.get(str(interaction.user.id), {}).get("times", [])
         if not times:
@@ -4880,7 +4898,10 @@ class MenuPrincipalView(discord.ui.View):
             embed=embed, view=SeguindoView(interaction.user.id, times), ephemeral=True,
         )
 
-    @discord.ui.button(label="🔜 Próximos jogos", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="🔜 Próximos jogos", style=discord.ButtonStyle.secondary, row=1,
+        custom_id="futebola:menu:proximos",
+    )
     async def btn_proximos(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = SeguirTimeSelectView(modo="proximos")
         if not view.children:
@@ -4892,7 +4913,10 @@ class MenuPrincipalView(discord.ui.View):
             "Escolha o time:", view=view, ephemeral=True,
         )
 
-    @discord.ui.button(label="🗓 Calendário", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="🗓 Calendário", style=discord.ButtonStyle.secondary, row=1,
+        custom_id="futebola:menu:calendario",
+    )
     async def btn_calendario(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "📅 **Calendário** — escolha a data:",
@@ -4901,12 +4925,12 @@ class MenuPrincipalView(discord.ui.View):
         )
 
 
-def _embed_menu() -> discord.Embed:
+def _embed_menu(*, fixo: bool = False) -> discord.Embed:
     embed = discord.Embed(
         title="⚽ Football Bot — Menu",
         description=(
             "Use os **botões** abaixo — quase não precisa digitar.\n\n"
-            "Atalhos rápidos: `!menu` · `/menu` · `!hoje` · `/hoje` · `!seguindo`"
+            "Atalhos: `!hoje` · `/hoje` · `!seguindo` · `/seguir`"
         ),
         color=0x3B82F6,
     )
@@ -4915,7 +4939,79 @@ def _embed_menu() -> discord.Embed:
         value="Comandos `/` no Discord têm **autocomplete** (liga, time).",
         inline=False,
     )
+    if fixo:
+        embed.set_footer(text="Painel fixo deste canal — os botões não expiram")
     return embed
+
+
+_MENU_CANAL_PATH = os.path.join(os.path.dirname(__file__), "menu_canal.json")
+
+
+def _carregar_menu_canal() -> dict:
+    try:
+        with open(_MENU_CANAL_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _salvar_menu_canal(data: dict) -> None:
+    with open(_MENU_CANAL_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+async def _publicar_menu_canal():
+    """Publica ou atualiza o menu fixo no canal CANAL_COMANDOS."""
+    if not CANAL_COMANDOS_ID:
+        print("[Menu] CANAL_COMANDOS não configurado — painel fixo desativado.")
+        return
+    canal = bot.get_channel(CANAL_COMANDOS_ID)
+    if canal is None:
+        try:
+            canal = await bot.fetch_channel(CANAL_COMANDOS_ID)
+        except Exception as e:
+            print(f"[Menu] Canal {CANAL_COMANDOS_ID} inacessível: {e}")
+            return
+    if not isinstance(canal, discord.TextChannel):
+        print(f"[Menu] {CANAL_COMANDOS_ID} não é um canal de texto.")
+        return
+
+    view  = MenuPrincipalView(persistent=True)
+    embed = _embed_menu(fixo=True)
+    meta  = _carregar_menu_canal()
+
+    if meta.get("channel_id") == CANAL_COMANDOS_ID and meta.get("message_id"):
+        try:
+            msg = await canal.fetch_message(int(meta["message_id"]))
+            await msg.edit(embed=embed, view=view)
+            print(f"[Menu] Painel atualizado (#{canal.name}, msg {msg.id})")
+            return
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f"[Menu] Erro ao editar msg {meta.get('message_id')}: {e}")
+
+    try:
+        async for msg in canal.history(limit=40):
+            if msg.author.id != bot.user.id or not msg.embeds:
+                continue
+            titulo = msg.embeds[0].title or ""
+            if "Football Bot" in titulo and "Menu" in titulo:
+                await msg.edit(embed=embed, view=view)
+                _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
+                print(f"[Menu] Painel reutilizado (#{canal.name}, msg {msg.id})")
+                return
+    except discord.Forbidden:
+        print(f"[Menu] Sem permissão de ler histórico em #{canal.name}")
+    except Exception as e:
+        print(f"[Menu] Erro ao buscar histórico: {e}")
+
+    try:
+        msg = await canal.send(embed=embed, view=view)
+        _salvar_menu_canal({"channel_id": CANAL_COMANDOS_ID, "message_id": msg.id})
+        print(f"[Menu] Novo painel publicado (#{canal.name}, msg {msg.id})")
+    except Exception as e:
+        print(f"[Menu] Erro ao enviar painel: {e}")
 
 
 # ==========================================
@@ -5380,7 +5476,7 @@ def _build_ajuda_embed() -> discord.Embed:
     embed = discord.Embed(
         title="⚽ Football Bot — Comandos",
         description=(
-            "🎛 **`!menu`** ou **`/menu`** — painel com botões (recomendado, quase sem digitar).\n"
+            "🎛 **Menu fixo** no canal de comandos (botões permanentes) ou `!menu` / `/menu`.\n"
             "Também: `!comando` ou `/comando` com autocomplete."
         ),
         color=0x3B82F6,
