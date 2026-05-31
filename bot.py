@@ -1058,14 +1058,123 @@ def _forma_html(resultados: list) -> str:
     return f'<div class="forma">{spans}</div>'
 
 
+def _logo_time_bzzoiro(nome: str, logo_map: dict) -> str:
+    """Resolve logo ESPN a partir do nome do time na tabela Bzzoiro."""
+    if nome in logo_map:
+        return logo_map[nome]
+    n = _strip_accents(nome.lower())
+    for k, url in logo_map.items():
+        kn = _strip_accents(k.lower())
+        if kn in n or n in kn:
+            return url
+    for bz, espn in _BZ_ESPN_ALIASES.items():
+        if _strip_accents(bz.lower()) == n:
+            return logo_map.get(espn, "")
+    return ""
+
+
+def _bz_form_to_list(form: str) -> list[str]:
+    """Converte forma Bzzoiro (ex. 'WDDDW', antigo→recente) para lista [mais recente, …]."""
+    s = (form or "").strip().upper()[:5]
+    return list(reversed(s)) if s else []
+
+
+def _bz_row_to_team(row: dict, logo_map: dict) -> dict:
+    nome = row.get("team_name", "")
+    return {
+        "rank": row.get("position", 0),
+        "team": {"name": nome, "logo": _logo_time_bzzoiro(nome, logo_map)},
+        "all": {
+            "played": row.get("played", 0),
+            "win":    row.get("won", 0),
+            "draw":   row.get("drawn", 0),
+            "lose":   row.get("lost", 0),
+        },
+        "goalsDiff": row.get("gd", 0),
+        "points":    row.get("pts", 0),
+        "forma":     _bz_form_to_list(row.get("form", "")),
+    }
+
+
+def buscar_tabela_bzzoiro(league_id: int) -> dict | None:
+    """Classificação via Bzzoiro (temporada is_current, forma e placar atualizados)."""
+    data = _bzzoiro_get(f"leagues/{league_id}/standings/")
+    if not data:
+        return None
+    season = data.get("season") or {}
+    logo_map = _buscar_logos_brasileiros()
+    year = season.get("year")
+
+    if data.get("grouped"):
+        grupos = []
+        for gname, rows in (data.get("groups") or {}).items():
+            teams = [_bz_row_to_team(r, logo_map) for r in (rows or [])]
+            if teams:
+                grupos.append({"name": gname, "teams": teams})
+        if not grupos:
+            return None
+        return {"type": "groups", "groups": grupos, "season_year": year}
+
+    teams = [_bz_row_to_team(r, logo_map) for r in (data.get("standings") or [])]
+    teams.sort(key=lambda t: t.get("rank", 99))
+    if not teams:
+        return None
+    return {"type": "league", "teams": teams, "season_year": year}
+
+
+def buscar_tabela_por_chave(chave: str) -> dict | None:
+    """Tabela da liga: Bzzoiro quando disponível (BR/Lib/Sula), senão ESPN."""
+    bz_id = _BZ_LIGA_TO_ID.get(chave)
+    if bz_id and BZZOIRO_TOKEN:
+        dados = buscar_tabela_bzzoiro(bz_id)
+        if dados:
+            return dados
+    slug = LIGAS.get(chave)
+    return buscar_tabela(slug) if slug else None
+
+
+def _espn_standings_max_played(entries: list) -> int:
+    mx = 0
+    for e in entries:
+        try:
+            mx = max(mx, int(_stat(e.get("stats", []), "gamesPlayed") or 0))
+        except (TypeError, ValueError):
+            pass
+    return mx
+
+
+def _espn_standings_raw_entries(data: dict) -> list:
+    if not data:
+        return []
+    children = data.get("children", [])
+    if len(children) > 1:
+        return []  # grupos tratados no fluxo principal
+    if children:
+        return (children[0].get("standings") or {}).get("entries", [])
+    return (data.get("standings") or {}).get("entries", [])
+
+
 def buscar_tabela(slug: str) -> dict | None:
     """Retorna standings. Ligas com grupos → {"type":"groups","groups":[{name,teams}]}.
     Ligas normais → {"type":"league","teams":[...]}."""
-    ano  = datetime.now().year
-    data = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": ano})
-    # Competições que cruzam anos (ex: UCL 2025/26 → season=2025) — tenta ano anterior
-    if not data or (not data.get("children") and not (data.get("standings") or {}).get("entries")):
-        data = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": ano - 1})
+    ano  = datetime.now(tz=BRT).year
+    data = None
+    for season in (ano, ano - 1):
+        cand = _espn_get(f"{ESPN_V2}/{slug}/standings", {"season": season})
+        if not cand:
+            continue
+        # Múltiplos grupos (Libertadores etc.) — aceita na primeira resposta válida
+        if len(cand.get("children", [])) > 1:
+            data = cand
+            break
+        entries = _espn_standings_raw_entries(cand)
+        if not entries:
+            continue
+        # Não usar temporada anterior já encerrada (ex.: 38 rodadas em maio/2026)
+        if season < ano and _espn_standings_max_played(entries) >= 34:
+            continue
+        data = cand
+        break
     if not data:
         return None
     forma = _buscar_forma_times(slug)
@@ -4378,7 +4487,7 @@ async def cmd_tabela(ctx, *, nome_liga: str = "brasileirao"):
     msg = await ctx.send(f"📊 Gerando tabela do **{nome_liga.title()}**...")
     try:
         loop  = asyncio.get_event_loop()
-        dados = await loop.run_in_executor(None, buscar_tabela, LIGAS[chave])
+        dados = await loop.run_in_executor(None, buscar_tabela_por_chave, chave)
         if not dados:
             await msg.edit(content="❌ Sem dados de classificação para esta liga. Se for fase eliminatória, use `!chaveamento`.")
             return
@@ -5782,12 +5891,16 @@ async def slash_tabela(interaction: discord.Interaction, liga: str = "brasileira
         caminho = await gerar_mata_mata_png(jogos, f"{nome_liga} — {nome_rodada}")
         await interaction.followup.send(file=discord.File(caminho))
         return
-    entradas = await loop.run_in_executor(None, buscar_tabela, LIGAS[chave])
-    if not entradas:
+    dados = await loop.run_in_executor(None, buscar_tabela_por_chave, chave)
+    if not dados:
         await interaction.followup.send(f"Tabela indisponível para {nome_liga}.")
         return
     try:
-        caminho = await gerar_tabela_png(entradas, nome_liga, LIGAS[chave])
+        slug = LIGAS.get(chave, "")
+        if dados["type"] == "groups":
+            caminho = await gerar_tabela_grupos_png(dados["groups"], nome_liga, slug=slug)
+        else:
+            caminho = await gerar_tabela_png(dados["teams"], nome_liga, slug=slug)
         await interaction.followup.send(file=discord.File(caminho))
     except Exception as e:
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
