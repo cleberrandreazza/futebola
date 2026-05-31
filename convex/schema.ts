@@ -9,5 +9,13 @@ export default defineSchema({
     userId: v.string(),
     times: v.array(v.string()),
     noticiasVistas: v.record(v.string(), v.array(v.string())),
+    prefs: v.optional(
+      v.object({
+        noticias: v.boolean(),
+        jogos: v.boolean(),
+        lembrete: v.boolean(),
+      })
+    ),
+    lembretesEnviados: v.optional(v.array(v.string())),
   }).index("by_user", ["userId"]),
 });

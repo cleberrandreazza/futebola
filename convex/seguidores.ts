@@ -2,9 +2,17 @@ import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 
 // Estrutura de cada entrada (igual ao seguindo.json)
+const prefsValidator = v.object({
+  noticias: v.boolean(),
+  jogos: v.boolean(),
+  lembrete: v.boolean(),
+});
+
 const entryValidator = v.object({
   times: v.array(v.string()),
   noticiasVistas: v.record(v.string(), v.array(v.string())),
+  prefs: v.optional(prefsValidator),
+  lembretesEnviados: v.optional(v.array(v.string())),
 });
 
 // Proteção simples server-to-server: o bot é um servidor confiável, não há
@@ -26,10 +34,20 @@ export const getAll = query({
     const docs = await ctx.db.query("seguidores").collect();
     const out: Record<
       string,
-      { times: string[]; noticiasVistas: Record<string, string[]> }
+      {
+        times: string[];
+        noticiasVistas: Record<string, string[]>;
+        prefs?: { noticias: boolean; jogos: boolean; lembrete: boolean };
+        lembretesEnviados?: string[];
+      }
     > = {};
     for (const d of docs) {
-      out[d.userId] = { times: d.times, noticiasVistas: d.noticiasVistas };
+      out[d.userId] = {
+        times: d.times,
+        noticiasVistas: d.noticiasVistas,
+        ...(d.prefs ? { prefs: d.prefs } : {}),
+        ...(d.lembretesEnviados ? { lembretesEnviados: d.lembretesEnviados } : {}),
+      };
     }
     return out;
   },
@@ -54,6 +72,10 @@ export const replaceAll = mutation({
         userId,
         times: entry.times,
         noticiasVistas: entry.noticiasVistas,
+        ...(entry.prefs ? { prefs: entry.prefs } : {}),
+        ...(entry.lembretesEnviados
+          ? { lembretesEnviados: entry.lembretesEnviados }
+          : {}),
       });
     }
     return null;

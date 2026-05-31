@@ -3337,6 +3337,7 @@ class FootballBot(commands.Bot):
         verificar_noticias_times.start()
         verificar_jogos_times.start()
         monitorar_eventos_times.start()
+        lembrete_pre_jogo.start()
         if CANAL_RESUMO_ID:
             resumo_diario.start()
         else:
@@ -3389,16 +3390,43 @@ def _convex_args(extra: dict | None = None) -> dict:
     return args
 
 
+_PREFS_PADRAO = {"noticias": True, "jogos": True, "lembrete": True}
+LEMBRETE_MIN_ANTES = 25   # minutos antes do apito
+LEMBRETE_MAX_ANTES = 55
+
+
+def _prefs_de(dados: dict) -> dict:
+    p = dados.get("prefs") or {}
+    return {
+        "noticias": bool(p.get("noticias", True)),
+        "jogos":    bool(p.get("jogos", True)),
+        "lembrete": bool(p.get("lembrete", True)),
+    }
+
+
+def _uids_com_pref(uids: set[int], chave: str) -> set[int]:
+    out: set[int] = set()
+    for uid in uids:
+        if _prefs_de(_SEGUINDO.get(str(uid), {})).get(chave, True):
+            out.add(uid)
+    return out
+
+
 def _carregar_seguindo() -> dict:
     if _convex_client:
         try:
             data = _convex_client.query("seguidores:getAll", _convex_args())
             out: dict = {}
             for uid, entry in (data or {}).items():
-                out[uid] = {
+                row = {
                     "times": list(entry.get("times", [])),
                     "noticias_vistas": dict(entry.get("noticiasVistas", {})),
                 }
+                if entry.get("prefs"):
+                    row["prefs"] = dict(entry["prefs"])
+                if entry.get("lembretesEnviados"):
+                    row["lembretes_enviados"] = list(entry["lembretesEnviados"])
+                out[uid] = row
             print(f"[Convex] {len(out)} seguidor(es) carregado(s).")
             return out
         except Exception as e:
@@ -3413,13 +3441,23 @@ def _carregar_seguindo() -> dict:
 def _salvar_seguindo(data: dict) -> None:
     if _convex_client:
         try:
-            payload = {
-                uid: {
+            payload = {}
+            for uid, entry in data.items():
+                row = {
                     "times": list(entry.get("times", [])),
                     "noticiasVistas": dict(entry.get("noticias_vistas", {})),
                 }
-                for uid, entry in data.items()
-            }
+                prefs = entry.get("prefs")
+                if prefs:
+                    row["prefs"] = {
+                        "noticias": bool(prefs.get("noticias", True)),
+                        "jogos":    bool(prefs.get("jogos", True)),
+                        "lembrete": bool(prefs.get("lembrete", True)),
+                    }
+                lem = entry.get("lembretes_enviados")
+                if lem:
+                    row["lembretesEnviados"] = list(lem)[-150:]
+                payload[uid] = row
             _convex_client.mutation("seguidores:replaceAll", _convex_args({"dados": payload}))
             return
         except Exception as e:
@@ -3768,6 +3806,8 @@ async def verificar_noticias_times():
     if not _SEGUINDO:
         return
     for uid_str, dados in list(_SEGUINDO.items()):
+        if not _prefs_de(dados).get("noticias", True):
+            continue
         times  = dados.get("times", [])
         vistas = dados.get("noticias_vistas", {})
         salvar = False
@@ -3796,6 +3836,61 @@ async def verificar_noticias_times():
     _salvar_seguindo(_SEGUINDO)
 
 
+@tasks.loop(minutes=10)
+async def lembrete_pre_jogo():
+    """Avisa ~30 min antes do apito inicial dos jogos de times seguidos."""
+    if not _SEGUINDO or not BZZOIRO_TOKEN:
+        return
+    agora = datetime.now(tz=BRT)
+    loop  = asyncio.get_event_loop()
+    eventos = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
+    salvar  = False
+    for uid_str, dados in list(_SEGUINDO.items()):
+        if not _prefs_de(dados).get("lembrete", True):
+            continue
+        times = dados.get("times", [])
+        if not times:
+            continue
+        enviados = set(dados.get("lembretes_enviados", []))
+        mudou    = False
+        for ev in eventos:
+            status = (ev.get("status") or "").lower()
+            if status not in ("notstarted", "ns", ""):
+                continue
+            eid = str(ev.get("id"))
+            if eid in enviados:
+                continue
+            home = ev.get("home_team", "")
+            away = ev.get("away_team", "")
+            if not any(_time_match(t, home) or _time_match(t, away) for t in times):
+                continue
+            try:
+                kick = datetime.fromisoformat(
+                    (ev.get("event_date") or "").replace("Z", "+00:00")
+                ).astimezone(BRT)
+            except Exception:
+                continue
+            delta_min = (kick - agora).total_seconds() / 60
+            if not (LEMBRETE_MIN_ANTES <= delta_min <= LEMBRETE_MAX_ANTES):
+                continue
+            try:
+                user = await bot.fetch_user(int(uid_str))
+                await user.send(
+                    f"⏰ **Lembrete** — jogo em ~{int(delta_min)} min\n"
+                    f"**{home} × {away}**\n"
+                    f"🕐 {kick.strftime('%H:%M')} (horário de Brasília)"
+                )
+            except Exception:
+                pass
+            enviados.add(eid)
+            mudou = True
+        if mudou:
+            dados["lembretes_enviados"] = list(enviados)[-150:]
+            salvar = True
+    if salvar:
+        _salvar_seguindo(_SEGUINDO)
+
+
 @tasks.loop(minutes=2)
 async def verificar_jogos_times():
     """A cada 2 min detecta jogos ao vivo de times seguidos e avisa o início via DM.
@@ -3806,6 +3901,8 @@ async def verificar_jogos_times():
     # Mapa: token_normalizado → set[user_id]
     times_map: dict[str, set[int]] = {}
     for uid_str, dados in _SEGUINDO.items():
+        if not _prefs_de(dados).get("jogos", True):
+            continue
         for t in dados.get("times", []):
             tk = _strip_accents(t.lower())
             times_map.setdefault(tk, set()).add(int(uid_str))
@@ -3856,7 +3953,7 @@ async def verificar_jogos_times():
         # Notificação de início
         if state not in ("NS", "FT", "AET", "PEN") and not jd["notif_inicio"]:
             jd["notif_inicio"] = True
-            for uid in interessados:
+            for uid in _uids_com_pref(interessados, "jogos"):
                 try:
                     user = await bot.fetch_user(uid)
                     await user.send(
@@ -3912,7 +4009,7 @@ async def monitorar_eventos_times():
                 msg = _bz_incident_para_msg(inc, nome_h, nome_a)
                 if not msg:
                     continue
-                for uid in jd["user_ids"]:
+                for uid in _uids_com_pref(jd["user_ids"], "jogos"):
                     try:
                         user = await bot.fetch_user(uid)
                         await user.send(msg)
@@ -3928,7 +4025,7 @@ async def monitorar_eventos_times():
                     pen_txt = (f"  (pênaltis {pen.get('home')} × {pen.get('away')})"
                                if pen.get("home") is not None else "")
                     msg_fim = f"🏁 **Fim de jogo!**\n**{nome_h} {home_s} × {away_s} {nome_a}**{pen_txt}"
-                    for uid in jd["user_ids"]:
+                    for uid in _uids_com_pref(jd["user_ids"], "jogos"):
                         try:
                             user = await bot.fetch_user(uid)
                             await user.send(msg_fim)
@@ -3953,6 +4050,7 @@ for _task_loop, _task_nome in (
     (atualizar_players, "atualizar_players"),
     (resumo_diario, "resumo_diario"),
     (verificar_noticias_times, "verificar_noticias_times"),
+    (lembrete_pre_jogo, "lembrete_pre_jogo"),
     (verificar_jogos_times, "verificar_jogos_times"),
     (monitorar_eventos_times, "monitorar_eventos_times"),
 ):
@@ -4625,29 +4723,90 @@ def _lista_times_menu() -> list[str]:
     return out
 
 
+async def _executar_notificacoes(
+    user: discord.abc.User,
+    tipo: str | None = None,
+    estado: str | None = None,
+) -> str:
+    """Mostra ou altera preferências de DM do !seguir."""
+    uid_str = str(user.id)
+    if uid_str not in _SEGUINDO:
+        _SEGUINDO[uid_str] = {"times": [], "noticias_vistas": {}, "prefs": dict(_PREFS_PADRAO)}
+    dados = _SEGUINDO[uid_str]
+    prefs = _prefs_de(dados)
+    chaves = {"noticias", "jogos", "lembrete", "notícias", "noticia"}
+    ligar  = {"ligar", "on", "ativar", "sim", "true", "1"}
+    desligar = {"desligar", "off", "desativar", "nao", "não", "false", "0"}
+
+    if not tipo:
+        return (
+            "**🔔 Suas notificações**\n"
+            f"• 📰 Notícias: {'✅ ligado' if prefs['noticias'] else '❌ desligado'}\n"
+            f"• ⚽ Jogos ao vivo: {'✅ ligado' if prefs['jogos'] else '❌ desligado'}\n"
+            f"• ⏰ Lembrete pré-jogo (~30 min): {'✅ ligado' if prefs['lembrete'] else '❌ desligado'}\n\n"
+            "Alterar: `!notificacoes noticias desligar` ou `/notificacoes`"
+        )
+
+    t = tipo.lower().replace("notícias", "noticias").replace("noticia", "noticias")
+    if t not in ("noticias", "jogos", "lembrete"):
+        return "❌ Tipo inválido. Use: `noticias`, `jogos` ou `lembrete`."
+    if not estado:
+        val = prefs[t]
+        return f"**{t}** está {'ligado' if val else 'desligado'}. Use `ligar` ou `desligar`."
+    e = estado.lower()
+    if e in ligar:
+        prefs[t] = True
+    elif e in desligar:
+        prefs[t] = False
+    else:
+        return "❌ Estado inválido. Use `ligar` ou `desligar`."
+    dados["prefs"] = prefs
+    _salvar_seguindo(_SEGUINDO)
+    return f"✅ **{t}** {'ativado' if prefs[t] else 'desativado'}."
+
+
 async def _executar_seguir(user: discord.abc.User, time: str) -> str:
     """Registra time seguido e tenta DM. Retorna mensagem para o usuário."""
     time = (time or "").strip()
     if not time:
         return "❌ Informe o nome do time."
+    if BZZOIRO_TOKEN:
+        resolvido = _bz_resolve_team(time)
+        if resolvido:
+            _, time = resolvido
+        else:
+            return (
+                f"❌ Time **{time}** não encontrado na base do bot.\n"
+                f"Tente o nome oficial (ex.: Flamengo, Palmeiras, Corinthians)."
+            )
     uid_str = str(user.id)
     if uid_str not in _SEGUINDO:
-        _SEGUINDO[uid_str] = {"times": [], "noticias_vistas": {}}
+        _SEGUINDO[uid_str] = {
+            "times": [], "noticias_vistas": {}, "prefs": dict(_PREFS_PADRAO),
+        }
     dados = _SEGUINDO[uid_str]
+    dados.setdefault("prefs", dict(_PREFS_PADRAO))
     if any(_strip_accents(t.lower()) == _strip_accents(time.lower())
            for t in dados.get("times", [])):
         return f"📌 Você já segue **{time}**. Use `!seguindo` ou o menu **Meus times**."
     dados.setdefault("times", []).append(time)
     _salvar_seguindo(_SEGUINDO)
+    prefs = _prefs_de(dados)
+    linhas = []
+    if prefs["noticias"]:
+        linhas.append("• 📰 Notícias e novidades")
+    if prefs["jogos"]:
+        linhas.append("• ⚽ Alertas quando o jogo começar")
+        linhas.append("• 🥅 Gols e eventos importantes")
+        linhas.append("• 🏁 Resultado final")
+    if prefs["lembrete"]:
+        linhas.append("• ⏰ Lembrete ~30 min antes do jogo")
+    aviso_prefs = "\n".join(linhas) if linhas else "• (nenhum alerta ligado — use `!notificacoes`)"
     try:
         await user.send(
             f"⭐ **Você está seguindo {time}!**\n"
-            f"Você receberá aqui:\n"
-            f"• 📰 Notícias e novidades\n"
-            f"• ⚽ Alertas quando o jogo começar\n"
-            f"• 🥅 Gols e eventos importantes\n"
-            f"• 🏁 Resultado final\n\n"
-            f"Use `!seguindo` ou o menu para deixar de seguir."
+            f"Você receberá aqui:\n{aviso_prefs}\n\n"
+            f"Ajuste em `!notificacoes`. Use `!seguindo` para deixar de seguir."
         )
         return f"✅ Seguindo **{time}**! Confirmação enviada no privado."
     except discord.Forbidden:
@@ -5036,6 +5195,14 @@ class MenuPrincipalView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="🔔 Alertas", style=discord.ButtonStyle.secondary, row=2,
+        custom_id="futebola:menu:notificacoes",
+    )
+    async def btn_notificacoes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = await _executar_notificacoes(interaction.user)
+        await interaction.response.send_message(msg, ephemeral=True)
+
 
 def _embed_menu(*, fixo: bool = False) -> discord.Embed:
     embed = discord.Embed(
@@ -5278,6 +5445,13 @@ async def cmd_seguir(ctx, *, time: str = ""):
         except Exception:
             pass
     await ctx.send(msg, delete_after=12 if "privado" in msg else None)
+
+
+@bot.command(name="notificacoes", aliases=["prefs", "alertas"])
+async def cmd_notificacoes(ctx, tipo: str = None, estado: str = None):
+    """Preferências de DM do !seguir: !notificacoes · !notificacoes noticias desligar"""
+    msg = await _executar_notificacoes(ctx.author, tipo, estado)
+    await ctx.send(msg)
 
 
 @bot.command(name="deixar")
@@ -5600,7 +5774,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!hoje` `/hoje` — Jogos do dia + select de partidas\n"
             "`!brasileirao` `!premierleague` `!champions` … — Jogos da liga hoje\n"
             "`!brasileirao 01/06/2026` — Jogos da liga em uma data específica\n"
-            "`!calendario` — Botões **Hoje / Amanhã / Outra data** (+ select de jogos)"
+            "`!calendario` `/calendario` — Botões **Hoje / Amanhã / Outra data** (+ select de jogos)"
         ),
         inline=False,
     )
@@ -5628,8 +5802,9 @@ def _build_ajuda_embed() -> discord.Embed:
     embed.add_field(
         name="🔔  Seguir Times (DM privada)",
         value=(
-            "`!seguir` — Menu para escolher o time (ou `!seguir Flamengo`)\n"
+            "`!seguir` — Menu para escolher o time (nome validado via Bzzoiro)\n"
             "`/seguir` — Mesmo com autocomplete de time\n"
+            "`!notificacoes` `/notificacoes` — Ligar/desligar notícias, jogos ou lembrete\n"
             "`!deixar` ou `!seguindo` — Parar de seguir (select)"
         ),
         inline=False,
@@ -6129,11 +6304,13 @@ def buscar_eventos_hoje_bzzoiro() -> list[dict]:
     return events
 
 
-def _buscar_event_id_por_time(nome_time: str) -> int | None:
-    """Retorna o event_id Bzzoiro mais recente (hoje ou últimos 14 dias) para um time."""
+def _bz_resolve_team(nome_time: str) -> tuple[int, str] | None:
+    """Resolve nome digitado para (team_id, nome_oficial) via mapa Bzzoiro."""
     team_map = _bz_build_team_map()
-    busca    = nome_time.lower().strip()
-    result   = team_map.get(busca)
+    if not team_map:
+        return None
+    busca  = nome_time.lower().strip()
+    result = team_map.get(busca)
     if not result:
         best, best_score = None, 0
         for norm, val in team_map.items():
@@ -6142,6 +6319,12 @@ def _buscar_event_id_por_time(nome_time: str) -> int | None:
                 if score > best_score:
                     best_score, best = score, val
         result = best
+    return result
+
+
+def _buscar_event_id_por_time(nome_time: str) -> int | None:
+    """Retorna o event_id Bzzoiro mais recente (hoje ou últimos 14 dias) para um time."""
+    result = _bz_resolve_team(nome_time)
     if not result:
         return None
     team_id, _ = result
@@ -6475,6 +6658,40 @@ async def slash_seguir(interaction: discord.Interaction, time: str = ""):
 @bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
 async def slash_hoje(interaction: discord.Interaction):
     await _responder_jogos_hoje(interaction=interaction)
+
+
+@bot.tree.command(name="calendario", description="Calendário de jogos — hoje, amanhã ou outra data")
+@discord.app_commands.describe(data="Data dd/mm/aaaa (opcional)")
+async def slash_calendario(interaction: discord.Interaction, data: str = None):
+    if not data:
+        await interaction.response.send_message(
+            "📅 **Calendário** — escolha a data:",
+            view=CalendarioDataView(),
+            ephemeral=True,
+        )
+        return
+    try:
+        dt = datetime.strptime(data.strip(), "%d/%m/%Y").date()
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Data inválida. Use `dd/mm/aaaa`.", ephemeral=True,
+        )
+        return
+    await _responder_calendario_data(dt, interaction=interaction)
+
+
+@bot.tree.command(name="notificacoes", description="Preferências de alertas do !seguir")
+@discord.app_commands.describe(
+    tipo="noticias, jogos ou lembrete",
+    estado="ligar ou desligar (vazio = ver status)",
+)
+async def slash_notificacoes(
+    interaction: discord.Interaction,
+    tipo: str = None,
+    estado: str = None,
+):
+    msg = await _executar_notificacoes(interaction.user, tipo, estado)
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @bot.tree.command(name="tabela", description="Classificação de uma liga")
