@@ -2407,6 +2407,21 @@ def _parsear_bracket_rounds(rounds_raw: list) -> list | None:
     return resultado
 
 
+def _espn_ano_competicao_ativa(eventos: list) -> int:
+    """Ano da edição vigente (maior volume de jogos eliminatórios; ignora fase de grupos)."""
+    contagem: dict[int, int] = {}
+    for ev in eventos:
+        season = ev.get("season") or {}
+        if season.get("slug") in _BRACKET_SKIP_SLUGS:
+            continue
+        ano = season.get("year")
+        if isinstance(ano, int):
+            contagem[ano] = contagem.get(ano, 0) + 1
+    if not contagem:
+        return datetime.now(tz=BRT).year
+    return max(contagem, key=lambda y: (contagem[y], y))
+
+
 def _bracket_via_scoreboard_wide(slug: str) -> list | None:
     """Busca TODOS os jogos mata-mata (6 meses) e agrupa por rodada com placar agregado."""
     hoje   = datetime.now(tz=BRT).date()
@@ -2440,15 +2455,22 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
     if not eventos:
         return None
 
+    ano_edicao = _espn_ano_competicao_ativa(eventos)
+    print(f"[Bracket] {slug}: edição {ano_edicao} ({len(eventos)} eventos no período)")
+
     # rounds_map: round_name -> {tie_key -> dict}
     rounds_map:      dict[str, dict] = {}
     round_sort_idx:  dict[str, int]  = {}
 
     for ev in eventos:
+        season      = ev.get("season") or {}
+        season_year = season.get("year")
+        if isinstance(season_year, int) and season_year != ano_edicao:
+            continue
         comp        = (ev.get("competitions") or [{}])[0]
         notes       = comp.get("notes") or []
         # Preferir season.slug (ESPN guarda o nome da fase aí, ex: 'round-of-16')
-        season_slug = (ev.get("season") or {}).get("slug", "")
+        season_slug = season.get("slug", "")
         if season_slug in _BRACKET_SKIP_SLUGS:
             continue
         if season_slug and season_slug in _SEASON_SLUG_DISPLAY:
@@ -2533,15 +2555,16 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
             })
         if matchups:
             result.append({"name": rn, "matchups": matchups})
+    buscar_chaveamento.ultimo_ano = ano_edicao
     return result or None
 
 
 def buscar_chaveamento(slug: str) -> list | None:
     """Retorna lista de rodadas [{name, matchups}] para chaveamento mata-mata."""
-    ano = datetime.now().year
+    ano = datetime.now(tz=BRT).year
 
-    # 1. Tenta bracket endpoint da ESPN (temporada atual e anterior, v2 e v1)
-    for season in (ano, ano - 1, None):
+    # 1. Tenta bracket endpoint da ESPN (só temporada atual; v2 e v1)
+    for season in (ano, None):
         for base in (ESPN_V2, ESPN_V1):
             params = {"season": season} if season is not None else None
             data = _espn_get(f"{base}/{slug}/bracket", params)
@@ -5800,7 +5823,8 @@ async def cmd_chaveamento(ctx, *, nome_liga: str = "champions"):
         return
 
     meta = LIGAS_META.get(chave, {"nome": nome_liga.title(), "emoji": "🏆"})
-    nome_display = f"{meta['emoji']} {meta['nome']}"
+    ano  = getattr(buscar_chaveamento, "ultimo_ano", datetime.now(tz=BRT).year)
+    nome_display = f"{meta['emoji']} {meta['nome']} {ano}"
     try:
         img = await gerar_chaveamento_png(rounds, nome_display)
         await msg.delete()
@@ -6875,8 +6899,9 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
     if not rounds:
         await interaction.followup.send(f"Chaveamento não disponível para {nome_liga}.")
         return
+    ano = getattr(buscar_chaveamento, "ultimo_ano", datetime.now(tz=BRT).year)
     try:
-        img = await gerar_chaveamento_png(rounds, nome_liga)
+        img = await gerar_chaveamento_png(rounds, f"{nome_liga} {ano}")
         await interaction.followup.send(file=discord.File(img))
     except Exception as e:
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
