@@ -2350,6 +2350,10 @@ _SEASON_SLUG_DISPLAY: dict[str, str] = {
     "third-stage":              "Quartas de Final",
     "fourth-stage":             "Semifinais",
 }
+# Nomes alternativos por competição (ESPN reutiliza os mesmos slugs)
+_CONMEBOL_STAGE_DISPLAY: dict[str, dict[str, str]] = {
+    "CONMEBOL.SUDAMERICANA": {"first-stage": "Fase Preliminar"},
+}
 # Fases de pontos corridos — não entram no bracket mata-mata
 _BRACKET_SKIP_SLUGS = frozenset({
     "group-stage", "league-stage", "regular-season", "group",
@@ -2407,26 +2411,48 @@ def _parsear_bracket_rounds(rounds_raw: list) -> list | None:
     return resultado
 
 
-def _espn_ano_competicao_ativa(eventos: list) -> int:
+def _espn_season_year(season: dict) -> int | None:
+    ano = season.get("year")
+    if isinstance(ano, int):
+        return ano
+    if isinstance(ano, str) and ano.isdigit():
+        return int(ano)
+    return None
+
+
+def _espn_ano_competicao_ativa(eventos: list, slug: str = "") -> int:
     """Ano da edição vigente (maior volume de jogos eliminatórios; ignora fase de grupos)."""
     contagem: dict[int, int] = {}
     for ev in eventos:
         season = ev.get("season") or {}
         if season.get("slug") in _BRACKET_SKIP_SLUGS:
             continue
-        ano = season.get("year")
-        if isinstance(ano, int):
+        ano = _espn_season_year(season)
+        if ano is not None:
             contagem[ano] = contagem.get(ano, 0) + 1
     if not contagem:
         return datetime.now(tz=BRT).year
+    ano_atual = datetime.now(tz=BRT).year
+    # CONMEBOL: prioriza o ano civil em curso se já houver jogos eliminatórios
+    if slug.startswith("CONMEBOL.") and ano_atual in contagem:
+        return ano_atual
     return max(contagem, key=lambda y: (contagem[y], y))
 
 
+def _bracket_intervalo_datas(slug: str) -> tuple[str, str]:
+    """Intervalo ESPN para montar o bracket (CONMEBOL: só do ano civil em curso)."""
+    hoje = datetime.now(tz=BRT).date()
+    fim  = (hoje + timedelta(days=90)).strftime("%Y%m%d")
+    if slug.startswith("CONMEBOL."):
+        inicio = date(hoje.year, 1, 1).strftime("%Y%m%d")
+    else:
+        inicio = (hoje - timedelta(days=210)).strftime("%Y%m%d")
+    return inicio, fim
+
+
 def _bracket_via_scoreboard_wide(slug: str) -> list | None:
-    """Busca TODOS os jogos mata-mata (6 meses) e agrupa por rodada com placar agregado."""
-    hoje   = datetime.now(tz=BRT).date()
-    inicio = (hoje - timedelta(days=210)).strftime("%Y%m%d")
-    fim    = (hoje + timedelta(days=90)).strftime("%Y%m%d")
+    """Busca TODOS os jogos mata-mata e agrupa por rodada com placar agregado."""
+    inicio, fim = _bracket_intervalo_datas(slug)
 
     eventos: list = []
     # Tentativa com date range
@@ -2455,8 +2481,8 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
     if not eventos:
         return None
 
-    ano_edicao = _espn_ano_competicao_ativa(eventos)
-    print(f"[Bracket] {slug}: edição {ano_edicao} ({len(eventos)} eventos no período)")
+    ano_edicao = _espn_ano_competicao_ativa(eventos, slug)
+    print(f"[Bracket] {slug}: edição {ano_edicao} ({len(eventos)} eventos, {inicio}-{fim})")
 
     # rounds_map: round_name -> {tie_key -> dict}
     rounds_map:      dict[str, dict] = {}
@@ -2464,9 +2490,17 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
 
     for ev in eventos:
         season      = ev.get("season") or {}
-        season_year = season.get("year")
-        if isinstance(season_year, int) and season_year != ano_edicao:
+        season_year = _espn_season_year(season)
+        if season_year is not None and season_year != ano_edicao:
             continue
+        try:
+            ev_ano = datetime.fromisoformat(
+                (ev.get("date") or "").replace("Z", "+00:00")
+            ).astimezone(BRT).year
+            if ev_ano < ano_edicao:
+                continue
+        except Exception:
+            pass
         comp        = (ev.get("competitions") or [{}])[0]
         notes       = comp.get("notes") or []
         # Preferir season.slug (ESPN guarda o nome da fase aí, ex: 'round-of-16')
@@ -2474,7 +2508,10 @@ def _bracket_via_scoreboard_wide(slug: str) -> list | None:
         if season_slug in _BRACKET_SKIP_SLUGS:
             continue
         if season_slug and season_slug in _SEASON_SLUG_DISPLAY:
-            round_name = _SEASON_SLUG_DISPLAY[season_slug]
+            round_name = (
+                _CONMEBOL_STAGE_DISPLAY.get(slug, {}).get(season_slug)
+                or _SEASON_SLUG_DISPLAY[season_slug]
+            )
         else:
             raw_name   = ((notes[0].get("headline", "") if notes else "")
                           or (ev.get("week") or {}).get("displayValue", "")
