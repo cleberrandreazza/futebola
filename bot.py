@@ -3330,9 +3330,44 @@ def _buscar_jogos_ao_vivo_todos() -> list[dict]:
     return resultado
 
 
+# Títulos que indicam notícia fora do time principal (feminino, base, outros esportes…)
+_NOTICIAS_FORA_PRINCIPAL_RE = re.compile(
+    r"(?i)(?:"
+    r"feminino|feminina|femininos|femininas|"
+    r"women|woman|ladies|wsl\b|"
+    r"futebol\s+feminino|equipe\s+feminina|sele[cç][aã]o\s+feminina|"
+    r"liga\s+feminina|brasileir[aã]o\s+feminino|libertadores\s+feminina|"
+    r"copa\s+do\s+brasil\s+feminina|mundial\s+feminino|"
+    r"sub[\-\s]?20|sub[\-\s]?17|sub[\-\s]?15|sub[\-\s]?23|"
+    r"categorias?\s+de\s+base|base\s+sub|juvenil|"
+    r"\bu[\-\s]?20\b|\bu[\-\s]?17\b|\bu[\-\s]?23\b|"
+    r"\btime\s+b\b|reservas?|"
+    r"futsal|v[oô]lei|basquete|handebol|e[\-\s]?sports?"
+    r")"
+)
+
+
+def _noticia_equipe_principal(time: str, title: str) -> bool:
+    """True se a notícia parece ser do time principal (masculino/profissional), não feminino/base/outros."""
+    t = _strip_accents((title or "").lower())
+    if _NOTICIAS_FORA_PRINCIPAL_RE.search(t):
+        return False
+    # Ex.: segue "Flamengo" mas o título fala de "Flamengo feminino"
+    tk = _strip_accents(time.lower())
+    for sufixo in (
+        " feminino", " feminina", " sub-20", " sub-17", " sub-15",
+        " base", " futsal", " juvenil", " reservas",
+    ):
+        if tk + sufixo.replace("-", "") in t.replace("-", "").replace(" ", ""):
+            return False
+        if tk + sufixo in t:
+            return False
+    return True
+
+
 async def _buscar_noticias_time(time: str) -> list[dict]:
-    """Busca notícias recentes do Google News RSS para o time."""
-    query = url_quote(f'"{time}" futebol')
+    """Busca notícias recentes do Google News RSS para o time principal."""
+    query = url_quote(f'"{time}" futebol -feminino -feminina -"futebol feminino"')
     url   = f"https://news.google.com/rss/search?q={query}&hl=pt-BR&gl=BR&ceid=BR:pt"
     try:
         async with aiohttp.ClientSession() as session:
@@ -3342,11 +3377,13 @@ async def _buscar_noticias_time(time: str) -> list[dict]:
                 xml_text = await r.text()
         root  = _ET.fromstring(xml_text)
         items = []
-        for item in root.findall(".//item")[:5]:
+        for item in root.findall(".//item")[:20]:
             title = item.findtext("title") or ""
             link  = item.findtext("link") or ""
-            if title and link:
+            if title and link and _noticia_equipe_principal(time, title):
                 items.append({"title": title, "link": link})
+                if len(items) >= 5:
+                    break
         return items
     except Exception as e:
         print(f"[Noticias] {time}: {e}")
@@ -3528,7 +3565,11 @@ async def verificar_noticias_times():
             try:
                 noticias    = await _buscar_noticias_time(time)
                 urls_vistas = set(vistas.get(time, []))
-                novas       = [n for n in noticias if n["link"] not in urls_vistas]
+                novas       = [
+                    n for n in noticias
+                    if n["link"] not in urls_vistas
+                    and _noticia_equipe_principal(time, n["title"])
+                ]
                 if not novas:
                     continue
                 user = await bot.fetch_user(int(uid_str))
