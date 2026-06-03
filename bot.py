@@ -2220,8 +2220,13 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
     return await _html_para_png(html, "jogos_temp.png", width=640)
 
 
+_EVENT_COVER_W = 550
+_EVENT_COVER_H = 120
+_EVENT_LOGO_PX = 72
+
+
 async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
-    """Capa 16:9 (960×540) para evento agendado do Discord."""
+    """Capa do evento Discord (550×120 — proporção do banner no cliente)."""
     nome_casa = jogo["teams"]["home"]["name"]
     nome_fora = jogo["teams"]["away"]["name"]
     urls = [u for u in (
@@ -2234,55 +2239,76 @@ async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
 
     try:
         dt = datetime.fromisoformat(jogo["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
-        data_linha = dt.strftime("%d/%m/%Y")
-        hora_linha = dt.strftime("%H:%M")
+        data_hora = dt.strftime("%d/%m · %H:%M BRT")
     except Exception:
-        data_linha, hora_linha = "—", "—"
+        data_hora = "—"
 
-    css = """
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{width:960px;height:540px;overflow:hidden}
-body{background:linear-gradient(145deg,#0f172a 0%,#1e3a5f 45%,#16213e 100%);
-     color:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;
-     align-items:center;justify-content:center;position:relative;padding:32px 40px 40px}
-.bg{position:absolute;inset:0;opacity:.08;background:radial-gradient(circle at 20% 50%,#3b82f6 0%,transparent 50%),
-     radial-gradient(circle at 80% 50%,#ef4444 0%,transparent 50%)}
-.wrap{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;
-      justify-content:center;gap:18px;width:100%;max-height:476px}
-.liga{font-size:13px;font-weight:600;color:#93c5fd;letter-spacing:1.1px;text-transform:uppercase;
-      text-align:center;line-height:1.3;max-width:90%}
-.confronto{display:flex;align-items:center;justify-content:center;gap:32px;width:100%}
-.lado{display:flex;flex-direction:column;align-items:center;gap:10px;flex:1;min-width:0;max-width:340px}
-.lado .nome{font-size:20px;font-weight:800;text-align:center;line-height:1.15;
-            word-wrap:break-word;max-width:100%}
-.lado img{width:118px;height:118px;object-fit:contain;
-          filter:drop-shadow(0 4px 14px rgba(0,0,0,.45))}
-.vs{font-size:34px;font-weight:900;color:#64748b;flex-shrink:0;line-height:1}
-.horario{font-size:17px;font-weight:700;color:#e2e8f0;text-align:center;line-height:1.3}
-.horario span{color:#93c5fd;font-size:24px}
-.rodape{position:absolute;bottom:14px;left:0;right:0;text-align:center;
-        font-size:10px;color:#475569;letter-spacing:.5px}
+    liga_curta = (liga_nome[:42] + "…") if len(liga_nome) > 45 else liga_nome
+    px = _EVENT_LOGO_PX
+
+    css = f"""
+*{{box-sizing:border-box;margin:0;padding:0}}
+html,body{{width:{_EVENT_COVER_W}px;height:{_EVENT_COVER_H}px;overflow:hidden}}
+body{{
+  background:linear-gradient(90deg,#0f172a 0%,#1e3a5f 50%,#16213e 100%);
+  color:#fff;font-family:'Segoe UI',Arial,sans-serif;
+  display:flex;align-items:center;justify-content:center;position:relative;
+  padding:10px 12px
+}}
+.bg{{
+  position:absolute;inset:0;opacity:.12;
+  background:radial-gradient(circle at 12% 50%,#3b82f6 0%,transparent 42%),
+             radial-gradient(circle at 88% 50%,#ef4444 0%,transparent 42%)
+}}
+.row{{
+  position:relative;z-index:1;display:flex;align-items:center;justify-content:center;
+  gap:10px;width:100%;height:100%
+}}
+.time{{
+  display:flex;align-items:center;gap:8px;flex:1;min-width:0;max-width:200px
+}}
+.time--away{{flex-direction:row-reverse;text-align:right}}
+.time img{{
+  width:{px}px;height:{px}px;object-fit:contain;flex-shrink:0;
+  filter:drop-shadow(0 2px 6px rgba(0,0,0,.45))
+}}
+.time .nome{{
+  font-size:13px;font-weight:800;line-height:1.1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0
+}}
+.mid{{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:3px;flex-shrink:0;width:108px;text-align:center
+}}
+.mid .vs{{font-size:22px;font-weight:900;color:#94a3b8;line-height:1}}
+.mid .liga{{
+  font-size:9px;font-weight:600;color:#93c5fd;text-transform:uppercase;
+  letter-spacing:.4px;line-height:1.2;max-width:104px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+}}
+.mid .hora{{font-size:11px;font-weight:700;color:#e2e8f0;line-height:1.2;white-space:nowrap}}
 """
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
         f'<div class="bg"></div>'
-        f'<div class="wrap">'
-        f'<div class="liga">⚽ {liga_nome}</div>'
-        f'<div class="confronto">'
-        f'<div class="lado">'
-        f'{_img_tag(b64_casa, nome_casa, 118)}'
+        f'<div class="row">'
+        f'<div class="time">'
+        f'{_img_tag(b64_casa, nome_casa, px)}'
         f'<span class="nome">{nome_casa}</span></div>'
-        f'<div class="vs">×</div>'
-        f'<div class="lado">'
-        f'{_img_tag(b64_fora, nome_fora, 118)}'
+        f'<div class="mid">'
+        f'<span class="vs">×</span>'
+        f'<span class="liga">{liga_curta}</span>'
+        f'<span class="hora">{data_hora}</span></div>'
+        f'<div class="time time--away">'
+        f'{_img_tag(b64_fora, nome_fora, px)}'
         f'<span class="nome">{nome_fora}</span></div>'
         f'</div>'
-        f'<div class="horario">{data_linha} · <span>{hora_linha}</span> BRT</div>'
-        f'</div>'
-        f'<div class="rodape">Futebol</div>'
         f'</body></html>'
     )
-    return await _html_para_png(html, "evento_cover_temp.png", width=960, height=540)
+    return await _html_para_png(
+        html, "evento_cover_temp.png",
+        width=_EVENT_COVER_W, height=_EVENT_COVER_H,
+    )
 
 
 async def gerar_artilheiro_png(artilheiros: list, nome_liga: str) -> str:
