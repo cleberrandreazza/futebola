@@ -1718,15 +1718,27 @@ def buscar_partida_espn(slug: str, event_id: str) -> dict | None:
 # RENDERIZAÇÃO HTML -> PNG
 # ==========================================
 
-async def _html_para_png(html: str, nome_arquivo: str, width: int = 700) -> str:
+async def _html_para_png(
+    html: str,
+    nome_arquivo: str,
+    width: int = 700,
+    height: int | None = None,
+) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.launch()
+        view_h = height if height is not None else 1600
         page = await browser.new_page()
-        await page.set_viewport_size({"width": width, "height": 1600})
+        await page.set_viewport_size({"width": width, "height": view_h})
         await page.set_content(html, wait_until="domcontentloaded")
         await page.wait_for_timeout(150)
-        corpo = await page.query_selector("body")
-        await corpo.screenshot(path=nome_arquivo)
+        if height is not None:
+            await page.screenshot(
+                path=nome_arquivo,
+                clip={"x": 0, "y": 0, "width": width, "height": height},
+            )
+        else:
+            corpo = await page.query_selector("body")
+            await corpo.screenshot(path=nome_arquivo)
         await browser.close()
     return nome_arquivo
 
@@ -2229,40 +2241,48 @@ async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
 
     css = """
 *{box-sizing:border-box;margin:0;padding:0}
-body{width:960px;height:540px;background:linear-gradient(145deg,#0f172a 0%,#1e3a5f 45%,#16213e 100%);
+html,body{width:960px;height:540px;overflow:hidden}
+body{background:linear-gradient(145deg,#0f172a 0%,#1e3a5f 45%,#16213e 100%);
      color:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;
-     align-items:center;justify-content:center;overflow:hidden;position:relative}
+     align-items:center;justify-content:center;position:relative;padding:32px 40px 40px}
 .bg{position:absolute;inset:0;opacity:.08;background:radial-gradient(circle at 20% 50%,#3b82f6 0%,transparent 50%),
      radial-gradient(circle at 80% 50%,#ef4444 0%,transparent 50%)}
-.liga{font-size:15px;font-weight:600;color:#93c5fd;letter-spacing:1.2px;text-transform:uppercase;
-      margin-bottom:28px;z-index:1}
-.confronto{display:flex;align-items:center;justify-content:center;gap:36px;width:100%;padding:0 48px;z-index:1}
-.lado{display:flex;flex-direction:column;align-items:center;gap:14px;flex:1;max-width:320px}
-.lado .nome{font-size:22px;font-weight:800;text-align:center;line-height:1.2}
-.lado img{width:88px;height:88px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.4))}
-.vs{font-size:42px;font-weight:900;color:#64748b;flex-shrink:0}
-.horario{margin-top:32px;font-size:20px;font-weight:700;color:#e2e8f0;z-index:1}
-.horario span{color:#93c5fd;font-size:28px;margin-left:8px}
-.rodape{position:absolute;bottom:18px;font-size:11px;color:#475569;letter-spacing:.5px}
+.wrap{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:18px;width:100%;max-height:476px}
+.liga{font-size:13px;font-weight:600;color:#93c5fd;letter-spacing:1.1px;text-transform:uppercase;
+      text-align:center;line-height:1.3;max-width:90%}
+.confronto{display:flex;align-items:center;justify-content:center;gap:32px;width:100%}
+.lado{display:flex;flex-direction:column;align-items:center;gap:10px;flex:1;min-width:0;max-width:340px}
+.lado .nome{font-size:20px;font-weight:800;text-align:center;line-height:1.15;
+            word-wrap:break-word;max-width:100%}
+.lado img{width:118px;height:118px;object-fit:contain;
+          filter:drop-shadow(0 4px 14px rgba(0,0,0,.45))}
+.vs{font-size:34px;font-weight:900;color:#64748b;flex-shrink:0;line-height:1}
+.horario{font-size:17px;font-weight:700;color:#e2e8f0;text-align:center;line-height:1.3}
+.horario span{color:#93c5fd;font-size:24px}
+.rodape{position:absolute;bottom:14px;left:0;right:0;text-align:center;
+        font-size:10px;color:#475569;letter-spacing:.5px}
 """
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
         f'<div class="bg"></div>'
+        f'<div class="wrap">'
         f'<div class="liga">⚽ {liga_nome}</div>'
         f'<div class="confronto">'
         f'<div class="lado">'
-        f'{_img_tag(b64_casa, nome_casa, 88)}'
+        f'{_img_tag(b64_casa, nome_casa, 118)}'
         f'<span class="nome">{nome_casa}</span></div>'
         f'<div class="vs">×</div>'
         f'<div class="lado">'
-        f'{_img_tag(b64_fora, nome_fora, 88)}'
+        f'{_img_tag(b64_fora, nome_fora, 118)}'
         f'<span class="nome">{nome_fora}</span></div>'
         f'</div>'
         f'<div class="horario">{data_linha} · <span>{hora_linha}</span> BRT</div>'
+        f'</div>'
         f'<div class="rodape">Futebol</div>'
         f'</body></html>'
     )
-    return await _html_para_png(html, "evento_cover_temp.png", width=960)
+    return await _html_para_png(html, "evento_cover_temp.png", width=960, height=540)
 
 
 async def gerar_artilheiro_png(artilheiros: list, nome_liga: str) -> str:
