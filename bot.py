@@ -2222,11 +2222,11 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 
 _EVENT_COVER_W = 550
 _EVENT_COVER_H = 120
-_EVENT_LOGO_PX = 72
+_EVENT_LOGO_PX = 78
 
 
 async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
-    """Capa do evento Discord (550×120 — proporção do banner no cliente)."""
+    """Capa do evento Discord (550×120) — apenas confronto clube × clube."""
     nome_casa = jogo["teams"]["home"]["name"]
     nome_fora = jogo["teams"]["away"]["name"]
     urls = [u for u in (
@@ -2236,14 +2236,6 @@ async def gerar_evento_cover_png(jogo: dict, liga_nome: str) -> str:
     logos = await _baixar_logos_paralelo(urls) if urls else {}
     b64_casa = logos.get(jogo["teams"]["home"].get("logo", ""), "")
     b64_fora = logos.get(jogo["teams"]["away"].get("logo", ""), "")
-
-    try:
-        dt = datetime.fromisoformat(jogo["fixture"]["date"].replace("Z", "+00:00")).astimezone(BRT)
-        data_hora = dt.strftime("%d/%m · %H:%M BRT")
-    except Exception:
-        data_hora = "—"
-
-    liga_curta = (liga_nome[:42] + "…") if len(liga_nome) > 45 else liga_nome
     px = _EVENT_LOGO_PX
 
     css = f"""
@@ -2253,52 +2245,44 @@ body{{
   background:linear-gradient(90deg,#0f172a 0%,#1e3a5f 50%,#16213e 100%);
   color:#fff;font-family:'Segoe UI',Arial,sans-serif;
   display:flex;align-items:center;justify-content:center;position:relative;
-  padding:10px 12px
+  padding:12px 24px
 }}
 .bg{{
   position:absolute;inset:0;opacity:.12;
-  background:radial-gradient(circle at 12% 50%,#3b82f6 0%,transparent 42%),
-             radial-gradient(circle at 88% 50%,#ef4444 0%,transparent 42%)
+  background:radial-gradient(circle at 10% 50%,#3b82f6 0%,transparent 45%),
+             radial-gradient(circle at 90% 50%,#ef4444 0%,transparent 45%)
 }}
 .row{{
-  position:relative;z-index:1;display:flex;align-items:center;justify-content:center;
-  gap:10px;width:100%;height:100%
+  position:relative;z-index:1;
+  display:grid;grid-template-columns:1fr auto 1fr;
+  align-items:center;width:100%;height:100%;column-gap:20px
 }}
 .time{{
-  display:flex;align-items:center;gap:8px;flex:1;min-width:0;max-width:200px
+  display:flex;align-items:center;gap:14px;min-width:0
 }}
-.time--away{{flex-direction:row-reverse;text-align:right}}
+.time--home{{justify-self:start}}
+.time--away{{justify-self:end;flex-direction:row-reverse}}
 .time img{{
   width:{px}px;height:{px}px;object-fit:contain;flex-shrink:0;
-  filter:drop-shadow(0 2px 6px rgba(0,0,0,.45))
+  filter:drop-shadow(0 2px 8px rgba(0,0,0,.5))
 }}
 .time .nome{{
-  font-size:13px;font-weight:800;line-height:1.1;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0
+  font-size:15px;font-weight:800;line-height:1.1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:168px
 }}
-.mid{{
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  gap:3px;flex-shrink:0;width:108px;text-align:center
+.vs{{
+  justify-self:center;font-size:30px;font-weight:900;color:#94a3b8;line-height:1;
+  padding:0 8px
 }}
-.mid .vs{{font-size:22px;font-weight:900;color:#94a3b8;line-height:1}}
-.mid .liga{{
-  font-size:9px;font-weight:600;color:#93c5fd;text-transform:uppercase;
-  letter-spacing:.4px;line-height:1.2;max-width:104px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis
-}}
-.mid .hora{{font-size:11px;font-weight:700;color:#e2e8f0;line-height:1.2;white-space:nowrap}}
 """
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8"><style>{css}</style></head><body>'
         f'<div class="bg"></div>'
         f'<div class="row">'
-        f'<div class="time">'
+        f'<div class="time time--home">'
         f'{_img_tag(b64_casa, nome_casa, px)}'
         f'<span class="nome">{nome_casa}</span></div>'
-        f'<div class="mid">'
         f'<span class="vs">×</span>'
-        f'<span class="liga">{liga_curta}</span>'
-        f'<span class="hora">{data_hora}</span></div>'
         f'<div class="time time--away">'
         f'{_img_tag(b64_fora, nome_fora, px)}'
         f'<span class="nome">{nome_fora}</span></div>'
