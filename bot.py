@@ -66,6 +66,9 @@ ESPN_V1 = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # Bzzoiro Sports Data API — Copa do Brasil 2026
 BZZOIRO_TOKEN     = os.getenv("BZZOIRO_TOKEN", "")
 BZZOIRO_BASE      = "https://sports.bzzoiro.com/api/v2"
+BZZOIRO_TIMEOUT   = float(os.getenv("BZZOIRO_TIMEOUT", "20"))
+BZZOIRO_RETRIES   = max(1, int(os.getenv("BZZOIRO_RETRIES", "3")))
+_BZZOIRO_RETRY_HTTP = frozenset({429, 500, 502, 503, 504})
 _BZ_COPA_LEAGUE          = 35
 _BZ_COPA_SEASON          = 78
 _BZ_BRASILEIRAO_LEAGUE   = 9
@@ -506,20 +509,40 @@ def _bzzoiro_get(endpoint: str, params: dict = None) -> dict | None:
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    try:
-        r = requests.get(
-            url,
-            headers={"Authorization": f"Token {BZZOIRO_TOKEN}"},
-            params=params,
-            timeout=10,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            _cache_set(key, data)
-            return data
-        print(f"[Bzzoiro] {endpoint} -> HTTP {r.status_code}")
-    except Exception as e:
-        print(f"[Bzzoiro] Erro {endpoint}: {e}")
+
+    headers = {"Authorization": f"Token {BZZOIRO_TOKEN}"}
+    last_err: str | Exception = "falha desconhecida"
+
+    for attempt in range(BZZOIRO_RETRIES):
+        if attempt:
+            time.sleep(2 ** (attempt - 1))  # 1s, 2s, …
+        try:
+            r = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=BZZOIRO_TIMEOUT,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                _cache_set(key, data)
+                return data
+            last_err = f"HTTP {r.status_code}"
+            if r.status_code in _BZZOIRO_RETRY_HTTP and attempt < BZZOIRO_RETRIES - 1:
+                print(f"[Bzzoiro] {endpoint} -> {last_err} (tentativa {attempt + 1}/{BZZOIRO_RETRIES})")
+                continue
+            print(f"[Bzzoiro] {endpoint} -> {last_err}")
+            return None
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            if attempt < BZZOIRO_RETRIES - 1:
+                print(f"[Bzzoiro] {endpoint} -> {e} (tentativa {attempt + 1}/{BZZOIRO_RETRIES})")
+                continue
+        except Exception as e:
+            print(f"[Bzzoiro] Erro {endpoint}: {e}")
+            return None
+
+    print(f"[Bzzoiro] Erro {endpoint}: {last_err}")
     return None
 
 
@@ -5014,11 +5037,14 @@ async def _responder_jogos_hoje(
 
     content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
     arquivo = discord.File(img)
+    send_kw = {"content": content, "file": arquivo}
+    if view is not None:
+        send_kw["view"] = view
     if interaction:
-        await interaction.followup.send(content=content, file=arquivo, view=view)
+        await interaction.followup.send(**send_kw)
     else:
         await msg.delete()
-        await ctx.send(content=content, file=arquivo, view=view)
+        await ctx.send(**send_kw)
 
 
 async def _responder_calendario_data(
@@ -5063,11 +5089,14 @@ async def _responder_calendario_data(
     view = SeguirView(jogos_ativos, "") if jogos_ativos else None
     content = f"📅 **Jogos de {data_display}** — {total} partidas em {len(jogos_por_liga)} ligas"
     arquivo = discord.File(img)
+    send_kw = {"content": content, "file": arquivo}
+    if view is not None:
+        send_kw["view"] = view
     if interaction:
-        await interaction.followup.send(content=content, file=arquivo, view=view)
+        await interaction.followup.send(**send_kw)
     else:
         await msg.delete()
-        await ctx.send(content=content, file=arquivo, view=view)
+        await ctx.send(**send_kw)
 
 
 async def _responder_proximos_time(
@@ -5099,11 +5128,14 @@ async def _responder_proximos_time(
             return
         arq = discord.File(caminho)
         v   = _view_proximos(jogos)
+        send_kw = {"file": arq}
+        if v is not None:
+            send_kw["view"] = v
         if interaction:
-            await interaction.followup.send(file=arq, view=v)
+            await interaction.followup.send(**send_kw)
         else:
             await msg.delete()
-            await ctx.send(file=arq, view=v)
+            await ctx.send(**send_kw)
 
     eh_selecao = bool(_canonical_selecao(nome_time))
     if eh_selecao:
@@ -5790,7 +5822,11 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
             await msg.edit(content=f"Erro ao gerar imagem: {e}")
             return
         await msg.delete()
-        await ctx.send(file=discord.File(caminho), view=_view_proximos(jogos))
+        v = _view_proximos(jogos)
+        send_kw = {"file": discord.File(caminho)}
+        if v is not None:
+            send_kw["view"] = v
+        await ctx.send(**send_kw)
 
     eh_selecao = bool(_canonical_selecao(nome_time)) or (liga_key in _LIGAS_SELECAO)
     if eh_selecao:
@@ -7002,7 +7038,11 @@ async def slash_proximos(
         except Exception as e:
             await interaction.followup.send(f"Erro ao gerar imagem: {e}")
             return
-        await interaction.followup.send(file=discord.File(caminho), view=_view_proximos(jogos))
+        v = _view_proximos(jogos)
+        send_kw = {"file": discord.File(caminho)}
+        if v is not None:
+            send_kw["view"] = v
+        await interaction.followup.send(**send_kw)
 
     eh_selecao = bool(_canonical_selecao(time)) or (liga_key in _LIGAS_SELECAO)
     if eh_selecao:
