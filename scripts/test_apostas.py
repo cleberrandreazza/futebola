@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import time
+from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -169,6 +170,50 @@ async def test_slash_saldo_handler() -> None:
     print("OK slash /saldo handler (mock)")
 
 
+def test_eventos_apostaveis_escopo() -> None:
+    import bot
+    from unittest.mock import patch
+
+    hoje = datetime.now(tz=bot.BRT).date()
+
+    def fake_espn(slug: str, data_yyyymmdd: str | None = None):
+        if slug == "fifa.world" and (data_yyyymmdd or "") == hoje.strftime("%Y%m%d"):
+            return [{
+                "fixture": {"id": "espn1", "date": "", "status": {"short": "NS", "elapsed": None}},
+                "teams": {
+                    "home": {"name": "South Korea", "logo": ""},
+                    "away": {"name": "Czechia", "logo": ""},
+                },
+                "goals": {"home": None, "away": None},
+                "meta": {},
+            }]
+        return []
+
+    bz_ev = {
+        "id": 9001,
+        "status": "notstarted",
+        "home_team": "South Korea",
+        "away_team": "Czechia",
+        "event_date": datetime.now(tz=bot.BRT).isoformat(),
+        "league_id": 99,
+    }
+
+    def bz_get(path, params=None):
+        if path == "events/":
+            return {"results": []}
+        if path == "events/9001/":
+            return bz_ev
+        return {}
+
+    with patch.object(bot, "_bzzoiro_get", side_effect=bz_get), patch.object(
+        bot, "buscar_jogos_do_dia", side_effect=fake_espn
+    ), patch.object(bot, "_find_bz_event_id", return_value=9001):
+        eventos = bot._bz_eventos_apostaveis()
+        assert any(e.get("id") == 9001 for e in eventos), eventos
+
+    print("OK _bz_eventos_apostaveis — cruzamento ESPN + Bzzoiro")
+
+
 def test_evento_apostavel() -> None:
     import bot
 
@@ -195,6 +240,8 @@ def test_evento_apostavel() -> None:
 def main() -> int:
     print("=== Regra notstarted ===")
     test_evento_apostavel()
+    print("\n=== Escopo /hoje ===")
+    test_eventos_apostaveis_escopo()
     print("\n=== Convex API ===")
     test_convex_api()
     print("\n=== Bot helpers ===")

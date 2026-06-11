@@ -136,6 +136,10 @@ LIGAS = {
 # Ligas exibidas no !hoje e no resumo diário automático
 LIGAS_RESUMO = ["copadomundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
+# Mesmo escopo de ligas para /apostar (partidas notstarted, via Bzzoiro)
+LIGAS_APOSTAS = list(LIGAS_RESUMO)
+APOSTAS_DIAS_FRENTE = 7
+
 PROXIMOS_PADRAO = 5
 PROXIMOS_MAX    = 25
 
@@ -209,9 +213,13 @@ def _criar_sessao(stream_url: str, title: str, event_id: str, slug: str,
     return token
 
 
-def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
-    """Busca o event_id Bzzoiro para um jogo de hoje pelos nomes dos times."""
-    hoje = datetime.now(tz=BRT).date()
+def _find_bz_event_id(
+    nome_casa: str,
+    nome_fora: str,
+    dia: date | None = None,
+) -> int | None:
+    """Busca o event_id Bzzoiro pelos nomes dos times em uma data (padrão: hoje BRT)."""
+    dia_busca = dia or datetime.now(tz=BRT).date()
     qh_orig = nome_casa.lower().strip()
     qa_orig = nome_fora.lower().strip()
     # Aplica alias ESPN→Bzzoiro (ex: "atlético-mg" → "atlético mineiro")
@@ -230,7 +238,7 @@ def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
         (_BZ_LIBERTADORES_LEAGUE, {}),
         (_BZ_SULAMERICANA_LEAGUE, {}),
     ]:
-        params = {"league_id": league_id, "date_from": str(hoje), "date_to": str(hoje), "limit": 50}
+        params = {"league_id": league_id, "date_from": str(dia_busca), "date_to": str(dia_busca), "limit": 50}
         params.update(extra)
         data = _bzzoiro_get("events/", params)
         for ev in (data or {}).get("results", []):
@@ -239,7 +247,7 @@ def _find_bz_event_id(nome_casa: str, nome_fora: str) -> int | None:
                 return ev.get("id")
 
     # Fallback: busca ampla sem filtro de liga (cobre todas as competições)
-    data = _bzzoiro_get("events/", {"date_from": str(hoje), "date_to": str(hoje), "limit": 200})
+    data = _bzzoiro_get("events/", {"date_from": str(dia_busca), "date_to": str(dia_busca), "limit": 200})
     for ev in (data or {}).get("results", []):
         if _match(ev):
             print(f"[BZ] encontrado (broad) liga={ev.get('league_id')} id={ev.get('id')} {ev.get('home_team')} x {ev.get('away_team')}")
@@ -4125,17 +4133,34 @@ def _validar_evento_apostavel(event_id: str) -> dict:
 
 
 def _bz_eventos_apostaveis() -> list[dict]:
-    """Partidas futuras (não iniciadas) nos próximos 7 dias."""
+    """Partidas apostáveis (notstarted) — mesmas ligas do /hoje, hoje até +APOSTAS_DIAS_FRENTE dias."""
     hoje = datetime.now(tz=BRT).date()
-    fim  = hoje + timedelta(days=7)
-    brutos: list[dict] = []
-    leagues = [
-        (_BZ_BRASILEIRAO_LEAGUE,  {}),
-        (_BZ_COPA_LEAGUE,         {"season_id": _BZ_COPA_SEASON}),
+    fim = hoje + timedelta(days=APOSTAS_DIAS_FRENTE)
+    por_id: dict[int, dict] = {}
+
+    def _add(ev: dict | None) -> None:
+        if not ev or ev.get("error"):
+            return
+        eid = ev.get("id")
+        if eid is None or not _evento_e_apostavel(ev):
+            return
+        por_id[int(eid)] = ev
+
+    # 1) Bzzoiro amplo (Copa do Mundo, amistosos, clubes, etc.)
+    data = _bzzoiro_get(
+        "events/",
+        {"date_from": str(hoje), "date_to": str(fim), "limit": 500},
+    )
+    for ev in (data or {}).get("results", []):
+        _add(ev)
+
+    # 2) Ligas Bzzoiro com filtros extras (ex.: season_id da Copa do Brasil)
+    for league_id, extra in [
+        (_BZ_BRASILEIRAO_LEAGUE, {}),
+        (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON}),
         (_BZ_LIBERTADORES_LEAGUE, {}),
         (_BZ_SULAMERICANA_LEAGUE, {}),
-    ]
-    for league_id, extra in leagues:
+    ]:
         params = {
             "league_id": league_id,
             "date_from": str(hoje),
@@ -4143,19 +4168,31 @@ def _bz_eventos_apostaveis() -> list[dict]:
             "limit": 80,
         }
         params.update(extra)
-        data = _bzzoiro_get("events/", params)
-        brutos.extend((data or {}).get("results", []))
+        for ev in (_bzzoiro_get("events/", params) or {}).get("results", []):
+            _add(ev)
 
-    seen: set[int] = set()
-    out: list[dict] = []
-    for ev in brutos:
-        eid = ev.get("id")
-        if not eid or eid in seen:
-            continue
-        if not _evento_e_apostavel(ev):
-            continue
-        seen.add(eid)
-        out.append(ev)
+    # 3) Cruzamento ESPN (/hoje): jogos NS → evento Bzzoiro para liquidação
+    for offset in range(APOSTAS_DIAS_FRENTE + 1):
+        dia = hoje + timedelta(days=offset)
+        yyyymmdd = dia.strftime("%Y%m%d")
+        for chave in LIGAS_APOSTAS:
+            slug = LIGAS.get(chave)
+            if not slug:
+                continue
+            jogos = buscar_jogos_do_dia(slug, yyyymmdd)
+            for jogo in jogos or []:
+                if jogo.get("fixture", {}).get("status", {}).get("short") != "NS":
+                    continue
+                home = (jogo.get("teams") or {}).get("home", {}).get("name", "")
+                away = (jogo.get("teams") or {}).get("away", {}).get("name", "")
+                if not home or not away:
+                    continue
+                bz_id = _find_bz_event_id(home, away, dia=dia)
+                if not bz_id or bz_id in por_id:
+                    continue
+                _add(_bzzoiro_get(f"events/{bz_id}/"))
+
+    out = list(por_id.values())
     out.sort(key=lambda e: e.get("event_date", ""))
     return out
 
@@ -6708,7 +6745,7 @@ def _build_ajuda_embed() -> discord.Embed:
         name="🎰  Apostas fictícias (cargo Boleiros / Admin)",
         value=(
             "`/saldo` — Seu saldo e estatísticas\n"
-            "`/apostar` — Apostar em partidas que **ainda não iniciaram** (1 / X / 2)\n"
+            "`/apostar` — Apostar em partidas que **ainda não iniciaram** (mesmas ligas do `/hoje`)\n"
             "`/minhas-apostas` — Apostas abertas e recentes\n"
             "`/rank-apostas` — Ranking por saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
@@ -7270,7 +7307,7 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
     """Constrói opções do Select Menu a partir de eventos Bzzoiro."""
     opts: list[discord.SelectOption] = []
     seen: set[int] = set()
-    _emoji = {9: "🇧🇷", 35: "🏆"}
+    _emoji = {9: "🇧🇷", 35: "🏆", 32: "🌎", 33: "🌎"}
     for ev in events:
         eid = ev.get("id")
         if not eid or eid in seen:
