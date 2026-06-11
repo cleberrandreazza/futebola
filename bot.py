@@ -136,9 +136,8 @@ LIGAS = {
 # Ligas exibidas no !hoje e no resumo diário automático
 LIGAS_RESUMO = ["copadomundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
-# Mesmo escopo de ligas para /apostar (partidas notstarted, via Bzzoiro)
+# Mesmo escopo de ligas para /apostar (somente jogos de hoje, iguais ao /hoje)
 LIGAS_APOSTAS = list(LIGAS_RESUMO)
-APOSTAS_DIAS_FRENTE = 7
 
 PROXIMOS_PADRAO = 5
 PROXIMOS_MAX    = 25
@@ -4132,65 +4131,42 @@ def _validar_evento_apostavel(event_id: str) -> dict:
     return {"ok": False, "error": msg, "event": ev}
 
 
+def _jogo_hoje_para_bzzoiro(jogo: dict, dia: date | None = None) -> dict | None:
+    """Converte um jogo do /hoje (fixture interna) em evento Bzzoiro notstarted."""
+    if jogo.get("fixture", {}).get("status", {}).get("short") != "NS":
+        return None
+    teams = jogo.get("teams") or {}
+    home = (teams.get("home") or {}).get("name", "")
+    away = (teams.get("away") or {}).get("name", "")
+    if not home or not away:
+        return None
+    dia_busca = dia or datetime.now(tz=BRT).date()
+
+    fid = jogo.get("fixture", {}).get("id")
+    if fid:
+        ev = _bzzoiro_get(f"events/{fid}/")
+        if ev and not ev.get("error") and _evento_e_apostavel(ev):
+            return ev
+
+    bz_id = _find_bz_event_id(home, away, dia=dia_busca)
+    if not bz_id:
+        return None
+    ev = _bzzoiro_get(f"events/{bz_id}/")
+    if ev and not ev.get("error") and _evento_e_apostavel(ev):
+        return ev
+    return None
+
+
 def _bz_eventos_apostaveis() -> list[dict]:
-    """Partidas apostáveis (notstarted) — mesmas ligas do /hoje, hoje até +APOSTAS_DIAS_FRENTE dias."""
+    """Partidas apostáveis hoje — mesmas ligas e jogos NS do /hoje (sem extras do Bzzoiro)."""
     hoje = datetime.now(tz=BRT).date()
-    fim = hoje + timedelta(days=APOSTAS_DIAS_FRENTE)
     por_id: dict[int, dict] = {}
 
-    def _add(ev: dict | None) -> None:
-        if not ev or ev.get("error"):
-            return
-        eid = ev.get("id")
-        if eid is None or not _evento_e_apostavel(ev):
-            return
-        por_id[int(eid)] = ev
-
-    # 1) Bzzoiro amplo (Copa do Mundo, amistosos, clubes, etc.)
-    data = _bzzoiro_get(
-        "events/",
-        {"date_from": str(hoje), "date_to": str(fim), "limit": 500},
-    )
-    for ev in (data or {}).get("results", []):
-        _add(ev)
-
-    # 2) Ligas Bzzoiro com filtros extras (ex.: season_id da Copa do Brasil)
-    for league_id, extra in [
-        (_BZ_BRASILEIRAO_LEAGUE, {}),
-        (_BZ_COPA_LEAGUE, {"season_id": _BZ_COPA_SEASON}),
-        (_BZ_LIBERTADORES_LEAGUE, {}),
-        (_BZ_SULAMERICANA_LEAGUE, {}),
-    ]:
-        params = {
-            "league_id": league_id,
-            "date_from": str(hoje),
-            "date_to": str(fim),
-            "limit": 80,
-        }
-        params.update(extra)
-        for ev in (_bzzoiro_get("events/", params) or {}).get("results", []):
-            _add(ev)
-
-    # 3) Cruzamento ESPN (/hoje): jogos NS → evento Bzzoiro para liquidação
-    for offset in range(APOSTAS_DIAS_FRENTE + 1):
-        dia = hoje + timedelta(days=offset)
-        yyyymmdd = dia.strftime("%Y%m%d")
-        for chave in LIGAS_APOSTAS:
-            slug = LIGAS.get(chave)
-            if not slug:
-                continue
-            jogos = buscar_jogos_do_dia(slug, yyyymmdd)
-            for jogo in jogos or []:
-                if jogo.get("fixture", {}).get("status", {}).get("short") != "NS":
-                    continue
-                home = (jogo.get("teams") or {}).get("home", {}).get("name", "")
-                away = (jogo.get("teams") or {}).get("away", {}).get("name", "")
-                if not home or not away:
-                    continue
-                bz_id = _find_bz_event_id(home, away, dia=dia)
-                if not bz_id or bz_id in por_id:
-                    continue
-                _add(_bzzoiro_get(f"events/{bz_id}/"))
+    for chave in LIGAS_APOSTAS:
+        for jogo in _buscar_jogos_liga_hoje(chave):
+            ev = _jogo_hoje_para_bzzoiro(jogo, dia=hoje)
+            if ev:
+                por_id[int(ev["id"])] = ev
 
     out = list(por_id.values())
     out.sort(key=lambda e: e.get("event_date", ""))
@@ -4522,21 +4498,28 @@ async def atualizar_players():
             print(f"[Player] Erro ao atualizar guild {guild_id}: {e}")
 
 
+def _buscar_jogos_liga_hoje(chave: str) -> list[dict]:
+    """Jogos de hoje para uma liga — mesma fonte usada pelo /hoje."""
+    try:
+        if chave in LIGAS_COPA:
+            return buscar_jogos_copa_hoje()
+        slug = LIGAS.get(chave)
+        if not slug:
+            return []
+        return buscar_jogos_do_dia(slug)
+    except Exception as e:
+        print(f"[JogosHoje] {chave}: {e}")
+        return []
+
+
 async def _buscar_jogos_resumo_paralelo(chaves: list[str] | None = None) -> dict:
     """Busca jogos de várias ligas em paralelo (resumo / !hoje)."""
     chaves = chaves or LIGAS_RESUMO
     loop = asyncio.get_event_loop()
 
     def _fetch(chave: str):
-        try:
-            if chave in LIGAS_COPA:
-                jogos = buscar_jogos_copa_hoje()
-            else:
-                jogos = buscar_jogos_do_dia(LIGAS[chave])
-            return chave, jogos if jogos else None
-        except Exception as e:
-            print(f"[Resumo] {chave}: {e}")
-            return chave, None
+        jogos = _buscar_jogos_liga_hoje(chave)
+        return chave, jogos if jogos else None
 
     parts = await asyncio.gather(
         *[loop.run_in_executor(None, _fetch, c) for c in chaves],
@@ -6745,7 +6728,7 @@ def _build_ajuda_embed() -> discord.Embed:
         name="🎰  Apostas fictícias (cargo Boleiros / Admin)",
         value=(
             "`/saldo` — Seu saldo e estatísticas\n"
-            "`/apostar` — Apostar em partidas que **ainda não iniciaram** (mesmas ligas do `/hoje`)\n"
+            "`/apostar` — Apostar nos jogos de **hoje** que ainda não iniciaram (mesmas ligas do `/hoje`)\n"
             "`/minhas-apostas` — Apostas abertas e recentes\n"
             "`/rank-apostas` — Ranking por saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
@@ -7323,8 +7306,14 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
         except Exception:
             tme = ""
         label = f"{emoji} {home} × {away}"[:95] + (f" · {tme}" if tme and tme != "00:00" else "")
-        desc  = "🔴 Ao Vivo" if status not in ("notstarted","finished") else ("✅ Encerrado" if status == "finished" else f"🕐 {tme}")
-        opts.append(discord.SelectOption(label=label[:100], value=str(eid), description=desc))
+        if status not in ("notstarted", "finished"):
+            desc = "🔴 Ao Vivo"
+        elif status == "finished":
+            desc = "✅ Encerrado"
+        else:
+            liga = _BZ_LEAGUE_NAMES.get(ev.get("league_id") or 0, "")
+            desc = liga[:100] if liga else "A iniciar"
+        opts.append(discord.SelectOption(label=label[:100], value=str(eid), description=desc[:100]))
     return opts[:25]
 
 
@@ -8069,7 +8058,7 @@ async def slash_apostar(interaction: discord.Interaction):
         return
     await interaction.followup.send(
         f"🎰 **Apostar** — odd **{APOSTA_ODD:.1f}x** · mín. **{APOSTA_MINIMA}** créditos\n"
-        "Somente partidas que **ainda não iniciaram**.\n"
+        "Somente jogos de **hoje** que ainda **não iniciaram**.\n"
         "Escolha a partida:",
         view=view,
     )

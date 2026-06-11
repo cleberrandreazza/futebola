@@ -176,8 +176,8 @@ def test_eventos_apostaveis_escopo() -> None:
 
     hoje = datetime.now(tz=bot.BRT).date()
 
-    def fake_espn(slug: str, data_yyyymmdd: str | None = None):
-        if slug == "fifa.world" and (data_yyyymmdd or "") == hoje.strftime("%Y%m%d"):
+    def fake_liga(chave: str):
+        if chave == "copadomundo":
             return [{
                 "fixture": {"id": "espn1", "date": "", "status": {"short": "NS", "elapsed": None}},
                 "teams": {
@@ -199,19 +199,18 @@ def test_eventos_apostaveis_escopo() -> None:
     }
 
     def bz_get(path, params=None):
-        if path == "events/":
-            return {"results": []}
-        if path == "events/9001/":
+        if path == "events/9001/" or path == "events/espn1/":
             return bz_ev
         return {}
 
-    with patch.object(bot, "_bzzoiro_get", side_effect=bz_get), patch.object(
-        bot, "buscar_jogos_do_dia", side_effect=fake_espn
+    with patch.object(bot, "_buscar_jogos_liga_hoje", side_effect=fake_liga), patch.object(
+        bot, "_bzzoiro_get", side_effect=bz_get
     ), patch.object(bot, "_find_bz_event_id", return_value=9001):
         eventos = bot._bz_eventos_apostaveis()
         assert any(e.get("id") == 9001 for e in eventos), eventos
+        assert len(eventos) == 1, eventos
 
-    print("OK _bz_eventos_apostaveis — cruzamento ESPN + Bzzoiro")
+    print("OK _bz_eventos_apostaveis — só jogos NS do /hoje")
 
 
 def test_evento_apostavel() -> None:
