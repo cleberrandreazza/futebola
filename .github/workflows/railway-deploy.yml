@@ -1,0 +1,37 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy bot to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "RAILWAY_TOKEN não configurado — pulando deploy via Actions."
+            echo "Configure o secret em GitHub → Settings → Secrets → Actions"
+            exit 0
+          fi
+          railway redeploy --yes --service "${{ secrets.RAILWAY_SERVICE_ID }}"
+
+      - name: Deploy Convex functions
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          if [ -z "$CONVEX_DEPLOY_KEY" ]; then
+            echo "CONVEX_DEPLOY_KEY não configurado — pulando deploy Convex."
+            exit 0
+          fi
+          npm ci
+          npx convex deploy
