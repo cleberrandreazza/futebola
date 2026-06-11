@@ -199,18 +199,19 @@ def test_eventos_apostaveis_escopo() -> None:
     }
 
     def bz_get(path, params=None):
-        if path == "events/9001/" or path == "events/espn1/":
-            return bz_ev
-        return {}
+        if path == "events/":
+            return {"results": []}
+        return {"error": True}
 
     with patch.object(bot, "_buscar_jogos_liga_hoje", side_effect=fake_liga), patch.object(
         bot, "_bzzoiro_get", side_effect=bz_get
-    ), patch.object(bot, "_find_bz_event_id", return_value=9001):
+    ), patch.object(bot, "_find_bz_event_id", return_value=None):
         eventos = bot._bz_eventos_apostaveis()
-        assert any(e.get("id") == 9001 for e in eventos), eventos
         assert len(eventos) == 1, eventos
+        assert eventos[0]["id"] == "espn:fifa.world:espn1", eventos[0]
+        assert eventos[0]["home_team"] == "South Korea"
 
-    print("OK _bz_eventos_apostaveis — só jogos NS do /hoje")
+    print("OK _bz_eventos_apostaveis — fallback ESPN quando Bzzoiro ausente")
 
 
 def test_evento_apostavel() -> None:

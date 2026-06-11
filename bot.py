@@ -4109,13 +4109,94 @@ def _apostas_credito_semanal() -> int:
     return n
 
 
+def _espn_aposta_event_id(slug: str, espn_id: str | int) -> str:
+    return f"espn:{slug}:{espn_id}"
+
+
+def _parse_espn_aposta_event_id(event_id: str) -> tuple[str, str] | None:
+    if not event_id.startswith("espn:"):
+        return None
+    parts = event_id.split(":", 2)
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+def _espn_fixture_por_id(slug: str, espn_id: str) -> dict | None:
+    """Fixture interna do /hoje para um event_id ESPN (somente hoje BRT)."""
+    hoje_str = datetime.now(tz=BRT).strftime("%Y%m%d")
+    for jogo in buscar_jogos_do_dia(slug, hoje_str):
+        if str(jogo.get("fixture", {}).get("id")) == str(espn_id):
+            return jogo
+    return None
+
+
+def _espn_jogo_para_aposta(jogo: dict, slug: str) -> dict:
+    home = (jogo.get("teams") or {}).get("home", {}).get("name", "?")
+    away = (jogo.get("teams") or {}).get("away", {}).get("name", "?")
+    espn_id = jogo.get("fixture", {}).get("id", "")
+    return {
+        "id": _espn_aposta_event_id(slug, espn_id),
+        "home_team": home,
+        "away_team": away,
+        "status": "notstarted",
+        "event_date": jogo.get("fixture", {}).get("date", ""),
+        "league_id": 0,
+        "_source": "espn",
+        "_espn_slug": slug,
+    }
+
+
+def _espn_resultado_1x2(jogo: dict) -> str | None:
+    short = (jogo.get("fixture") or {}).get("status", {}).get("short", "")
+    if short not in ("FT", "AET", "PEN"):
+        return None
+    hs = jogo.get("goals", {}).get("home")
+    as_ = jogo.get("goals", {}).get("away")
+    if hs is None or as_ is None:
+        return None
+    if hs > as_:
+        return "1"
+    if hs < as_:
+        return "2"
+    return "X"
+
+
+def _resultado_aposta_1x2(event_id: str) -> str | None:
+    """Resultado 1/X/2 (ou 'cancel') para liquidação — Bzzoiro ou ESPN."""
+    parsed = _parse_espn_aposta_event_id(event_id)
+    if parsed:
+        slug, espn_id = parsed
+        jogo = _espn_fixture_por_id(slug, espn_id)
+        return _espn_resultado_1x2(jogo) if jogo else None
+    ev = _bzzoiro_get(f"events/{event_id}/")
+    if not ev or ev.get("error"):
+        return None
+    return _bz_resultado_1x2(ev)
+
+
 def _evento_e_apostavel(ev: dict) -> bool:
     """Apostas só em partidas que ainda não iniciaram (status Bzzoiro: notstarted)."""
     return ev.get("status", "notstarted") == "notstarted"
 
 
 def _validar_evento_apostavel(event_id: str) -> dict:
-    """Consulta o Bzzoiro e recusa jogos já iniciados, encerrados ou cancelados."""
+    """Consulta Bzzoiro ou ESPN e recusa jogos já iniciados, encerrados ou cancelados."""
+    parsed = _parse_espn_aposta_event_id(event_id)
+    if parsed:
+        slug, espn_id = parsed
+        jogo = _espn_fixture_por_id(slug, espn_id)
+        if not jogo:
+            return {"ok": False, "error": "Partida não encontrada."}
+        short = jogo.get("fixture", {}).get("status", {}).get("short", "")
+        if short == "NS":
+            return {"ok": True, "event": _espn_jogo_para_aposta(jogo, slug)}
+        if short == "FT":
+            msg = "Esta partida já foi encerrada — apostas não são permitidas."
+        else:
+            msg = "Esta partida já começou — apostas só antes do apito inicial."
+        return {"ok": False, "error": msg, "event": _espn_jogo_para_aposta(jogo, slug)}
+
     ev = _bzzoiro_get(f"events/{event_id}/")
     if not ev or ev.get("error"):
         return {"ok": False, "error": "Partida não encontrada."}
@@ -4131,8 +4212,12 @@ def _validar_evento_apostavel(event_id: str) -> dict:
     return {"ok": False, "error": msg, "event": ev}
 
 
-def _jogo_hoje_para_bzzoiro(jogo: dict, dia: date | None = None) -> dict | None:
-    """Converte um jogo do /hoje (fixture interna) em evento Bzzoiro notstarted."""
+def _jogo_hoje_para_apostavel(
+    jogo: dict,
+    chave_liga: str,
+    dia: date | None = None,
+) -> dict | None:
+    """Converte jogo do /hoje em evento apostável (Bzzoiro ou ESPN fallback)."""
     if jogo.get("fixture", {}).get("status", {}).get("short") != "NS":
         return None
     teams = jogo.get("teams") or {}
@@ -4149,24 +4234,27 @@ def _jogo_hoje_para_bzzoiro(jogo: dict, dia: date | None = None) -> dict | None:
             return ev
 
     bz_id = _find_bz_event_id(home, away, dia=dia_busca)
-    if not bz_id:
-        return None
-    ev = _bzzoiro_get(f"events/{bz_id}/")
-    if ev and not ev.get("error") and _evento_e_apostavel(ev):
-        return ev
+    if bz_id:
+        ev = _bzzoiro_get(f"events/{bz_id}/")
+        if ev and not ev.get("error") and _evento_e_apostavel(ev):
+            return ev
+
+    slug = LIGAS.get(chave_liga)
+    if slug and fid:
+        return _espn_jogo_para_aposta(jogo, slug)
     return None
 
 
 def _bz_eventos_apostaveis() -> list[dict]:
     """Partidas apostáveis hoje — mesmas ligas e jogos NS do /hoje (sem extras do Bzzoiro)."""
     hoje = datetime.now(tz=BRT).date()
-    por_id: dict[int, dict] = {}
+    por_id: dict[str, dict] = {}
 
     for chave in LIGAS_APOSTAS:
         for jogo in _buscar_jogos_liga_hoje(chave):
-            ev = _jogo_hoje_para_bzzoiro(jogo, dia=hoje)
+            ev = _jogo_hoje_para_apostavel(jogo, chave, dia=hoje)
             if ev:
-                por_id[int(ev["id"])] = ev
+                por_id[str(ev["id"])] = ev
 
     out = list(por_id.values())
     out.sort(key=lambda e: e.get("event_date", ""))
@@ -4581,20 +4669,16 @@ async def liquidar_apostas():
     if not abertas:
         return
 
-    eventos_cache: dict[str, dict | None] = {}
+    eventos_cache: dict[str, str | None] = {}
     loop = asyncio.get_event_loop()
 
     for bet in abertas:
         eid = str(bet.get("eventId", ""))
         if eid not in eventos_cache:
             eventos_cache[eid] = await loop.run_in_executor(
-                None, lambda x=eid: _bzzoiro_get(f"events/{x}/")
+                None, _resultado_aposta_1x2, eid
             )
-        ev = eventos_cache[eid]
-        if not ev or ev.get("error"):
-            continue
-
-        res = _bz_resultado_1x2(ev)
+        res = eventos_cache[eid]
         if res is None:
             continue
 
@@ -7289,13 +7373,13 @@ def _buscar_event_id_por_time(nome_time: str) -> int | None:
 def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
     """Constrói opções do Select Menu a partir de eventos Bzzoiro."""
     opts: list[discord.SelectOption] = []
-    seen: set[int] = set()
+    seen: set[str] = set()
     _emoji = {9: "🇧🇷", 35: "🏆", 32: "🌎", 33: "🌎"}
     for ev in events:
         eid = ev.get("id")
-        if not eid or eid in seen:
+        if eid is None or str(eid) in seen:
             continue
-        seen.add(eid)
+        seen.add(str(eid))
         home   = ev.get("home_team", "?")
         away   = ev.get("away_team", "?")
         emoji  = _emoji.get(ev.get("league_id", 0), "⚽")
