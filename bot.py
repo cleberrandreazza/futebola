@@ -3465,22 +3465,30 @@ async def _iniciar_servidor_web():
 # BOT DISCORD
 # ==========================================
 
+def _iniciar_tasks_background():
+    """Inicia tasks pesadas uma única vez, após sync de slash commands."""
+    if getattr(bot, "_tasks_started", False):
+        return
+    bot._tasks_started = True
+    checar_jogos_ao_vivo.start()
+    atualizar_players.start()
+    verificar_noticias_times.start()
+    verificar_jogos_times.start()
+    monitorar_eventos_times.start()
+    lembrete_pre_jogo.start()
+    liquidar_apostas.start()
+    credito_semanal_apostas.start()
+    if CANAL_RESUMO_ID:
+        resumo_diario.start()
+    else:
+        print("[Resumo] CANAL_JOGOS_DO_DIA não configurado — resumo diário desativado.")
+    print("[Startup] Tasks em background iniciadas.")
+
+
 class FootballBot(commands.Bot):
     async def setup_hook(self):
         self.add_view(MenuPrincipalView(persistent=True))
         await _iniciar_servidor_web()
-        checar_jogos_ao_vivo.start()
-        atualizar_players.start()
-        verificar_noticias_times.start()
-        verificar_jogos_times.start()
-        monitorar_eventos_times.start()
-        lembrete_pre_jogo.start()
-        liquidar_apostas.start()
-        credito_semanal_apostas.start()
-        if CANAL_RESUMO_ID:
-            resumo_diario.start()
-        else:
-            print("[Resumo] CANAL_JOGOS_DO_DIA não configurado — resumo diário desativado.")
 
 
 intents = discord.Intents.default()
@@ -3491,22 +3499,46 @@ bot = FootballBot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f"Bot online: {bot.user}")
-    if not getattr(bot, "_startup_done", False):
-        asyncio.create_task(_startup_pos_ready())
+    if getattr(bot, "_startup_done", False):
+        return
+    if getattr(bot, "_startup_running", False):
+        return
+    bot._startup_running = True
+    asyncio.create_task(_startup_pos_ready())
 
 
 async def _startup_pos_ready():
     """Sync de slash commands e menu — em background para não bloquear interações."""
     try:
-        synced = await bot.tree.sync()
-        print(f"Slash commands sincronizados: {len(synced)}")
+        print("[Startup] Sincronizando slash commands...")
+        try:
+            synced = await asyncio.wait_for(bot.tree.sync(), timeout=90.0)
+            print(f"[Startup] Slash commands sincronizados: {len(synced)}")
+        except asyncio.TimeoutError:
+            print("[Startup] tree.sync() timeout (90s) — comandos podem estar desatualizados")
+        except Exception as e:
+            print(f"[Startup] Erro ao sincronizar slash commands: {e}")
+        if BZZOIRO_TOKEN:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _bz_build_team_map)
+        await _publicar_menu_canal()
+        _iniciar_tasks_background()
     except Exception as e:
-        print(f"Erro ao sincronizar slash commands: {e}")
-    if BZZOIRO_TOKEN:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _bz_build_team_map)
-    await _publicar_menu_canal()
-    bot._startup_done = True
+        print(f"[Startup] Falha: {e}")
+        import traceback
+        traceback.print_exc()
+        _iniciar_tasks_background()
+    finally:
+        bot._startup_done = True
+        bot._startup_running = False
+        print("[Startup] Concluído — bot pronto para comandos.")
+
+
+@bot.tree.interaction_check
+async def _log_slash_interaction(interaction: discord.Interaction) -> bool:
+    cmd = interaction.command.name if interaction.command else "?"
+    print(f"[Slash] /{cmd} ← {interaction.user} (guild {interaction.guild_id})")
+    return True
 
 
 @bot.tree.error
@@ -4171,7 +4203,8 @@ async def checar_jogos_ao_vivo():
 
         try:
             slug = dados["slug"]
-            sumario = buscar_partida_espn(slug, event_id)
+            loop = asyncio.get_event_loop()
+            sumario = await loop.run_in_executor(None, buscar_partida_espn, slug, event_id)
             if not sumario:
                 continue
 
@@ -4719,9 +4752,11 @@ class SeguirButton(discord.ui.Button):
             await interaction.response.send_message("📌 Jogo já monitorado neste canal.", ephemeral=True)
             return
 
-        sumario = buscar_partida_espn(self.slug, self.event_id)
+        await interaction.response.defer(ephemeral=True)
+        loop = asyncio.get_event_loop()
+        sumario = await loop.run_in_executor(None, buscar_partida_espn, self.slug, self.event_id)
         if not sumario:
-            await interaction.response.send_message("❌ Não foi possível encontrar o jogo.", ephemeral=True)
+            await interaction.followup.send("❌ Não foi possível encontrar o jogo.", ephemeral=True)
             return
 
         header      = sumario.get("header", {})
@@ -4742,7 +4777,7 @@ class SeguirButton(discord.ui.Button):
         self.style    = discord.ButtonStyle.success
         self.disabled = True
         await interaction.message.edit(view=self.view)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ **Monitoramento ativado!**\n"
             f"⚽ **{nome_casa}** × **{nome_fora}**\n"
             f"*Avisarei aqui sobre gols, cartões e fim de jogo.*",
@@ -7745,6 +7780,7 @@ async def slash_saldo(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
+    await interaction.response.defer(ephemeral=True)
     loop = asyncio.get_event_loop()
     ap = await loop.run_in_executor(
         None,
@@ -7752,7 +7788,7 @@ async def slash_saldo(interaction: discord.Interaction):
         str(interaction.user.id),
         interaction.user.display_name,
     )
-    await interaction.response.send_message(embed=_embed_saldo(ap), ephemeral=True)
+    await interaction.followup.send(embed=_embed_saldo(ap), ephemeral=True)
 
 
 @bot.tree.command(name="apostar", description="Apostar créditos fictícios em uma partida")
