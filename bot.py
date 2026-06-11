@@ -4350,8 +4350,8 @@ async def liquidar_apostas():
             print(f"[Apostas] Liquidada {aposta_id}: {home}×{away} → {res}")
 
 
-@credito_semanal_apostas.before_loop
-async def _before_credito_semanal():
+@liquidar_apostas.before_loop
+async def _before_liquidar_apostas():
     await bot.wait_until_ready()
 
 
@@ -4364,8 +4364,8 @@ async def credito_semanal_apostas():
         print(f"[Apostas] Crédito semanal aplicado a {n} apostador(es).")
 
 
-@liquidar_apostas.before_loop
-async def _before_liquidar_apostas():
+@credito_semanal_apostas.before_loop
+async def _before_credito_semanal():
     await bot.wait_until_ready()
 
 
