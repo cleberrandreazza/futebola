@@ -7,4 +7,5 @@ convex/_generated/
 
 # Estado local (fallback quando Convex não está configurado)
 seguindo.json
+apostas.json
 menu_canal.json

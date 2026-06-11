@@ -69,6 +69,14 @@ BZZOIRO_BASE      = "https://sports.bzzoiro.com/api/v2"
 BZZOIRO_TIMEOUT   = float(os.getenv("BZZOIRO_TIMEOUT", "20"))
 BZZOIRO_RETRIES   = max(1, int(os.getenv("BZZOIRO_RETRIES", "3")))
 _BZZOIRO_RETRY_HTTP = frozenset({429, 500, 502, 503, 504})
+
+# Apostas fictícias
+BOLEIRO_ROLE_ID   = int(os.getenv("BOLEIRO_ROLE_ID", "1510359568058679386"))
+ROLE_BOLEIRO      = os.getenv("ROLE_BOLEIRO", "Boleiros")
+CREDITO_SEMANAL   = int(os.getenv("CREDITO_SEMANAL", "1000"))
+CREDITO_INICIAL   = int(os.getenv("CREDITO_INICIAL", "1000"))
+APOSTA_MINIMA     = int(os.getenv("APOSTA_MINIMA", "10"))
+APOSTA_ODD        = float(os.getenv("APOSTA_ODD", "2.0"))
 _BZ_COPA_LEAGUE          = 35
 _BZ_COPA_SEASON          = 78
 _BZ_BRASILEIRAO_LEAGUE   = 9
@@ -3466,6 +3474,8 @@ class FootballBot(commands.Bot):
         verificar_jogos_times.start()
         monitorar_eventos_times.start()
         lembrete_pre_jogo.start()
+        liquidar_apostas.start()
+        credito_semanal_apostas.start()
         if CANAL_RESUMO_ID:
             resumo_diario.start()
         else:
@@ -3603,6 +3613,378 @@ _JOGOS_TIMES: dict = {}
 # event_ids de jogos já finalizados (evita reprocessar/reenviar quando o jogo
 # encerrado continua aparecendo no placar do dia).
 _JOGOS_ENCERRADOS: set = set()
+
+
+# ==========================================
+# APOSTAS FICTÍCIAS — persistência & helpers
+# ==========================================
+
+_APOSTAS_PATH = os.path.join(os.path.dirname(__file__), "apostas.json")
+
+
+def _iso_week_key(dt: datetime | None = None) -> str:
+    d = (dt or datetime.now(tz=BRT)).date()
+    return f"{d.isocalendar().year}-W{d.isocalendar().week:02d}"
+
+
+def _pode_apostar(member: discord.Member | None) -> bool:
+    if not member:
+        return False
+    if member.guild_permissions.administrator:
+        return True
+    if any(r.id == BOLEIRO_ROLE_ID for r in member.roles):
+        return True
+    alvo = ROLE_BOLEIRO.lower()
+    return any(r.name.lower() == alvo for r in member.roles)
+
+
+def _palpite_label(p: str, home: str, away: str) -> str:
+    if p == "1":
+        return f"Vitória {home}"
+    if p == "2":
+        return f"Vitória {away}"
+    return "Empate"
+
+
+def _carregar_apostas_local() -> dict:
+    try:
+        with open(_APOSTAS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+            data.setdefault("apostadores", {})
+            data.setdefault("apostas", [])
+            data.setdefault("nextId", 1)
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"apostadores": {}, "apostas": [], "nextId": 1}
+
+
+def _salvar_apostas_local(data: dict) -> None:
+    with open(_APOSTAS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _apostas_get_saldo(user_id: str) -> dict | None:
+    if _convex_client:
+        try:
+            return _convex_client.query(
+                "apostas:getSaldo", _convex_args({"userId": user_id})
+            )
+        except Exception as e:
+            print(f"[Apostas] Erro getSaldo Convex: {e}")
+    data = _carregar_apostas_local()
+    row = data["apostadores"].get(user_id)
+    if not row:
+        return None
+    return {"userId": user_id, **row}
+
+
+def _apostas_ensure(user_id: str, display_name: str) -> dict:
+    if _convex_client:
+        try:
+            return _convex_client.mutation(
+                "apostas:ensureApostador",
+                _convex_args({
+                    "userId": user_id,
+                    "displayName": display_name,
+                    "creditoInicial": CREDITO_INICIAL,
+                }),
+            )
+        except Exception as e:
+            print(f"[Apostas] Erro ensure Convex: {e}")
+    data = _carregar_apostas_local()
+    if user_id not in data["apostadores"]:
+        data["apostadores"][user_id] = {
+            "displayName": display_name,
+            "saldo": CREDITO_INICIAL,
+            "totalApostado": 0,
+            "totalGanho": 0,
+            "apostasGanhas": 0,
+            "apostasPerdidas": 0,
+            "ultimoCreditoSemanal": None,
+            "criadoEm": int(time.time() * 1000),
+        }
+        _salvar_apostas_local(data)
+    else:
+        data["apostadores"][user_id]["displayName"] = display_name
+        _salvar_apostas_local(data)
+    row = _carregar_apostas_local()["apostadores"][user_id]
+    return {"userId": user_id, **row}
+
+
+def _apostas_place(
+    user_id: str,
+    display_name: str,
+    event_id: str,
+    home: str,
+    away: str,
+    palpite: str,
+    valor: int,
+) -> dict:
+    if _convex_client:
+        try:
+            return _convex_client.mutation(
+                "apostas:placeBet",
+                _convex_args({
+                    "userId": user_id,
+                    "displayName": display_name,
+                    "eventId": event_id,
+                    "home": home,
+                    "away": away,
+                    "palpite": palpite,
+                    "valor": valor,
+                    "odd": APOSTA_ODD,
+                    "apostaMinima": APOSTA_MINIMA,
+                    "creditoInicial": CREDITO_INICIAL,
+                }),
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    data = _carregar_apostas_local()
+    _apostas_ensure(user_id, display_name)
+    data = _carregar_apostas_local()
+    ap = data["apostadores"][user_id]
+    if valor < APOSTA_MINIMA:
+        return {"ok": False, "error": f"Aposta mínima: {APOSTA_MINIMA} créditos."}
+    if ap["saldo"] < valor:
+        return {"ok": False, "error": f"Saldo insuficiente ({ap['saldo']} créditos)."}
+    for b in data["apostas"]:
+        if b["userId"] == user_id and b["status"] == "aberta" and b["eventId"] == event_id:
+            return {"ok": False, "error": "Você já tem uma aposta aberta nesta partida."}
+
+    retorno = int(valor * APOSTA_ODD)
+    bet_id = str(data["nextId"])
+    data["nextId"] += 1
+    now = int(time.time() * 1000)
+    data["apostas"].append({
+        "_id": bet_id,
+        "userId": user_id,
+        "eventId": event_id,
+        "home": home,
+        "away": away,
+        "palpite": palpite,
+        "odd": APOSTA_ODD,
+        "valor": valor,
+        "retornoPotencial": retorno,
+        "status": "aberta",
+        "criadaEm": now,
+    })
+    ap["saldo"] -= valor
+    ap["totalApostado"] += valor
+    ap["displayName"] = display_name
+    _salvar_apostas_local(data)
+    return {"ok": True, "apostaId": bet_id, "novoSaldo": ap["saldo"]}
+
+
+def _apostas_list_open() -> list[dict]:
+    if _convex_client:
+        try:
+            return _convex_client.query("apostas:listOpen", _convex_args()) or []
+        except Exception as e:
+            print(f"[Apostas] Erro listOpen: {e}")
+            return []
+    data = _carregar_apostas_local()
+    return [b for b in data["apostas"] if b.get("status") == "aberta"]
+
+
+def _apostas_list_user(user_id: str, limit: int = 10) -> list[dict]:
+    if _convex_client:
+        try:
+            return _convex_client.query(
+                "apostas:listByUser",
+                _convex_args({"userId": user_id, "limit": limit}),
+            ) or []
+        except Exception as e:
+            print(f"[Apostas] Erro listByUser: {e}")
+    data = _carregar_apostas_local()
+    bets = [b for b in data["apostas"] if b["userId"] == user_id]
+    bets.sort(key=lambda b: b.get("criadaEm", 0), reverse=True)
+    return bets[:limit]
+
+
+def _apostas_settle(aposta_id: str, resultado: str) -> bool:
+    if _convex_client:
+        try:
+            r = _convex_client.mutation(
+                "apostas:settle",
+                _convex_args({"apostaId": aposta_id, "resultado": resultado}),
+            )
+            return bool(r and r.get("ok"))
+        except Exception as e:
+            print(f"[Apostas] Erro settle Convex: {e}")
+            return False
+
+    data = _carregar_apostas_local()
+    bet = next((b for b in data["apostas"] if b.get("_id") == aposta_id), None)
+    if not bet or bet.get("status") != "aberta":
+        return False
+    ap = data["apostadores"].get(bet["userId"])
+    if not ap:
+        return False
+    if resultado == "ganhou":
+        ap["saldo"] += bet["retornoPotencial"]
+        ap["totalGanho"] += bet["retornoPotencial"] - bet["valor"]
+        ap["apostasGanhas"] += 1
+    elif resultado == "perdeu":
+        ap["totalGanho"] -= bet["valor"]
+        ap["apostasPerdidas"] += 1
+    else:
+        ap["saldo"] += bet["valor"]
+    bet["status"] = resultado
+    bet["liquidadaEm"] = int(time.time() * 1000)
+    _salvar_apostas_local(data)
+    return True
+
+
+def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
+    if _convex_client:
+        try:
+            return _convex_client.query(
+                "apostas:getRanking",
+                _convex_args({"criterio": criterio, "limit": limit}),
+            ) or []
+        except Exception as e:
+            print(f"[Apostas] Erro ranking: {e}")
+    data = _carregar_apostas_local()
+    rows = [
+        {"userId": uid, **row}
+        for uid, row in data["apostadores"].items()
+    ]
+    if criterio == "lucro":
+        rows.sort(key=lambda r: r.get("totalGanho", 0), reverse=True)
+    else:
+        rows.sort(key=lambda r: r.get("saldo", 0), reverse=True)
+    return rows[:limit]
+
+
+def _apostas_credito_semanal() -> int:
+    week = _iso_week_key()
+    if _convex_client:
+        try:
+            r = _convex_client.mutation(
+                "apostas:creditoSemanal",
+                _convex_args({"weekKey": week, "credito": CREDITO_SEMANAL}),
+            )
+            return int((r or {}).get("creditados", 0))
+        except Exception as e:
+            print(f"[Apostas] Erro creditoSemanal Convex: {e}")
+            return 0
+
+    data = _carregar_apostas_local()
+    n = 0
+    for ap in data["apostadores"].values():
+        if ap.get("ultimoCreditoSemanal") == week:
+            continue
+        ap["saldo"] = CREDITO_SEMANAL if ap["saldo"] == 0 else ap["saldo"] + CREDITO_SEMANAL
+        ap["ultimoCreditoSemanal"] = week
+        n += 1
+    if n:
+        _salvar_apostas_local(data)
+    return n
+
+
+def _bz_eventos_apostaveis() -> list[dict]:
+    """Partidas futuras (não iniciadas) nos próximos 7 dias."""
+    hoje = datetime.now(tz=BRT).date()
+    fim  = hoje + timedelta(days=7)
+    brutos: list[dict] = []
+    leagues = [
+        (_BZ_BRASILEIRAO_LEAGUE,  {}),
+        (_BZ_COPA_LEAGUE,         {"season_id": _BZ_COPA_SEASON}),
+        (_BZ_LIBERTADORES_LEAGUE, {}),
+        (_BZ_SULAMERICANA_LEAGUE, {}),
+    ]
+    for league_id, extra in leagues:
+        params = {
+            "league_id": league_id,
+            "date_from": str(hoje),
+            "date_to": str(fim),
+            "limit": 80,
+        }
+        params.update(extra)
+        data = _bzzoiro_get("events/", params)
+        brutos.extend((data or {}).get("results", []))
+
+    seen: set[int] = set()
+    out: list[dict] = []
+    for ev in brutos:
+        eid = ev.get("id")
+        if not eid or eid in seen:
+            continue
+        if ev.get("status", "notstarted") != "notstarted":
+            continue
+        seen.add(eid)
+        out.append(ev)
+    out.sort(key=lambda e: e.get("event_date", ""))
+    return out
+
+
+def _bz_resultado_1x2(ev: dict) -> str | None:
+    """Retorna '1', 'X', '2' ou None se indeterminado; 'cancel' se cancelada."""
+    st = ev.get("status", "")
+    if st in ("cancelled", "postponed", "abandoned", "deleted"):
+        return "cancel"
+    if st != "finished":
+        return None
+    hs = ev.get("home_score")
+    as_ = ev.get("away_score")
+    if hs is None or as_ is None:
+        return None
+    if hs > as_:
+        return "1"
+    if hs < as_:
+        return "2"
+    return "X"
+
+
+def _embed_saldo(ap: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎰 Seu saldo de apostas",
+        color=0xF59E0B,
+    )
+    embed.add_field(name="💰 Saldo", value=f"**{ap['saldo']:,}** créditos".replace(",", "."), inline=True)
+    embed.add_field(name="📈 Lucro", value=f"**{ap['totalGanho']:+,}**".replace(",", "."), inline=True)
+    embed.add_field(
+        name="📊 Registro",
+        value=f"{ap['apostasGanhas']}W · {ap['apostasPerdidas']}L",
+        inline=True,
+    )
+    embed.set_footer(
+        text=f"Crédito semanal: +{CREDITO_SEMANAL:,} (segunda) · odd {APOSTA_ODD:.1f}x".replace(",", ".")
+    )
+    return embed
+
+
+def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None) -> discord.Embed:
+    titulo = "🏆 Ranking — Saldo" if criterio == "saldo" else "🏆 Ranking — Lucro"
+    embed = discord.Embed(title=titulo, color=0xEAB308)
+    if not rows:
+        embed.description = "Ninguém apostou ainda."
+        return embed
+
+    medalhas = ("🥇", "🥈", "🥉")
+    linhas: list[str] = []
+    pos_viewer = None
+    for i, row in enumerate(rows):
+        pos = i + 1
+        if viewer_id and row["userId"] == viewer_id:
+            pos_viewer = pos
+        m = medalhas[i] if i < 3 else f"**{pos}.**"
+        nome = row.get("displayName", "?")[:24]
+        saldo = row.get("saldo", 0)
+        lucro = row.get("totalGanho", 0)
+        wl = f"{row.get('apostasGanhas', 0)}W-{row.get('apostasPerdidas', 0)}L"
+        if criterio == "lucro":
+            linhas.append(f"{m} {nome} — **{lucro:+,}** lucro · {saldo:,} créd · {wl}".replace(",", "."))
+        else:
+            linhas.append(f"{m} {nome} — **{saldo:,}** créd · {lucro:+,} lucro · {wl}".replace(",", "."))
+
+    embed.description = "\n".join(linhas)
+    if pos_viewer:
+        embed.set_footer(text=f"Sua posição neste ranking: #{pos_viewer}")
+    else:
+        embed.set_footer(text="Use /saldo para ver sua conta · apostas fictícias")
+    return embed
 
 
 def _time_match(query: str, nome: str) -> bool:
@@ -3925,6 +4307,66 @@ async def resumo_diario():
         file=discord.File(img),
     )
     print(f"[Resumo] Enviado: {total} jogos em {len(jogos_por_liga)} ligas.")
+
+
+# ==========================================
+# APOSTAS — tasks (liquidação + crédito semanal)
+# ==========================================
+
+@tasks.loop(minutes=5)
+async def liquidar_apostas():
+    abertas = await asyncio.get_event_loop().run_in_executor(None, _apostas_list_open)
+    if not abertas:
+        return
+
+    eventos_cache: dict[str, dict | None] = {}
+    loop = asyncio.get_event_loop()
+
+    for bet in abertas:
+        eid = str(bet.get("eventId", ""))
+        if eid not in eventos_cache:
+            eventos_cache[eid] = await loop.run_in_executor(
+                None, lambda x=eid: _bzzoiro_get(f"events/{x}/")
+            )
+        ev = eventos_cache[eid]
+        if not ev or ev.get("error"):
+            continue
+
+        res = _bz_resultado_1x2(ev)
+        if res is None:
+            continue
+
+        aposta_id = bet.get("_id")
+        if res == "cancel":
+            ok = await loop.run_in_executor(None, _apostas_settle, aposta_id, "cancelada")
+        elif res == bet.get("palpite"):
+            ok = await loop.run_in_executor(None, _apostas_settle, aposta_id, "ganhou")
+        else:
+            ok = await loop.run_in_executor(None, _apostas_settle, aposta_id, "perdeu")
+
+        if ok:
+            home = bet.get("home", "?")
+            away = bet.get("away", "?")
+            print(f"[Apostas] Liquidada {aposta_id}: {home}×{away} → {res}")
+
+
+@credito_semanal_apostas.before_loop
+async def _before_credito_semanal():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(time=datetime.time(hour=0, minute=5, tzinfo=BRT))
+async def credito_semanal_apostas():
+    if datetime.now(tz=BRT).weekday() != 0:
+        return
+    n = await asyncio.get_event_loop().run_in_executor(None, _apostas_credito_semanal)
+    if n:
+        print(f"[Apostas] Crédito semanal aplicado a {n} apostador(es).")
+
+
+@liquidar_apostas.before_loop
+async def _before_liquidar_apostas():
+    await bot.wait_until_ready()
 
 
 # ==========================================
@@ -5997,6 +6439,17 @@ def _build_ajuda_embed() -> discord.Embed:
         ),
         inline=False,
     )
+    embed.add_field(
+        name="🎰  Apostas fictícias (cargo Boleiros / Admin)",
+        value=(
+            "`/saldo` — Seu saldo e estatísticas\n"
+            "`/apostar` — Apostar em partidas futuras (1 / X / 2)\n"
+            "`/minhas-apostas` — Apostas abertas e recentes\n"
+            "`/rank-apostas` — Ranking por saldo ou lucro\n"
+            f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
+        ),
+        inline=False,
+    )
     if IPTV_URL:
         embed.add_field(
             name="📺  IPTV",
@@ -6573,6 +7026,120 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
     return opts[:25]
 
 
+class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
+    def __init__(self, ev: dict, palpite: str, uid: int, display_name: str):
+        super().__init__()
+        self.ev = ev
+        self.palpite = palpite
+        self.uid = uid
+        self.display_name = display_name
+        self.valor_input = discord.ui.TextInput(
+            label=f"Créditos (mín. {APOSTA_MINIMA})",
+            placeholder=str(APOSTA_MINIMA),
+            min_length=1,
+            max_length=8,
+        )
+        self.add_item(self.valor_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            valor = int(self.valor_input.value.strip().replace(".", "").replace(",", ""))
+        except ValueError:
+            await interaction.response.send_message("❌ Valor inválido.", ephemeral=True)
+            return
+
+        home = self.ev.get("home_team", "?")
+        away = self.ev.get("away_team", "?")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            _apostas_place,
+            str(self.uid),
+            self.display_name,
+            str(self.ev.get("id")),
+            home,
+            away,
+            self.palpite,
+            valor,
+        )
+        if not result.get("ok"):
+            await interaction.response.send_message(f"❌ {result.get('error', 'Erro')}", ephemeral=True)
+            return
+
+        retorno = int(valor * APOSTA_ODD)
+        await interaction.response.send_message(
+            f"✅ Aposta registrada!\n"
+            f"**{home} × {away}**\n"
+            f"Palpite: **{_palpite_label(self.palpite, home, away)}** · odd **{APOSTA_ODD:.1f}x**\n"
+            f"Valor: **{valor:,}** → retorno **{retorno:,}** créditos\n"
+            f"Saldo restante: **{result.get('novoSaldo', 0):,}**".replace(",", "."),
+            ephemeral=True,
+        )
+
+
+class ApostaPalpiteView(discord.ui.View):
+    def __init__(self, ev: dict, uid: int, display_name: str):
+        super().__init__(timeout=120)
+        self.ev = ev
+        self.uid = uid
+        self.display_name = display_name
+        home = ev.get("home_team", "Casa")
+        away = ev.get("away_team", "Fora")
+
+        b1 = discord.ui.Button(label=f"1 · {home[:20]}", style=discord.ButtonStyle.primary, row=0)
+        bx = discord.ui.Button(label="X · Empate", style=discord.ButtonStyle.secondary, row=0)
+        b2 = discord.ui.Button(label=f"2 · {away[:20]}", style=discord.ButtonStyle.primary, row=0)
+        b1.callback = lambda i: self._palpite(i, "1")
+        bx.callback = lambda i: self._palpite(i, "X")
+        b2.callback = lambda i: self._palpite(i, "2")
+        self.add_item(b1)
+        self.add_item(bx)
+        self.add_item(b2)
+
+    async def _palpite(self, interaction: discord.Interaction, palpite: str):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("❌ Não é sua aposta.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            ApostaValorModal(self.ev, palpite, self.uid, self.display_name)
+        )
+
+
+class ApostaSelectView(discord.ui.View):
+    def __init__(self, eventos: list[dict], uid: int, display_name: str):
+        super().__init__(timeout=180)
+        self.uid = uid
+        self.display_name = display_name
+        opcoes = _build_partida_options(eventos)
+        if not opcoes:
+            return
+        sel = discord.ui.Select(
+            placeholder="⚽ Escolha a partida para apostar...",
+            options=opcoes,
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+        self._eventos = {str(ev.get("id")): ev for ev in eventos if ev.get("id")}
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("❌ Não é sua aposta.", ephemeral=True)
+            return
+        eid = interaction.data["values"][0]
+        ev = self._eventos.get(eid)
+        if not ev:
+            await interaction.response.send_message("❌ Partida não encontrada.", ephemeral=True)
+            return
+        home = ev.get("home_team", "?")
+        away = ev.get("away_team", "?")
+        view = ApostaPalpiteView(ev, self.uid, self.display_name)
+        await interaction.response.send_message(
+            f"🎰 **{home} × {away}** — escolha o palpite (odd **{APOSTA_ODD:.1f}x**):",
+            view=view,
+            ephemeral=True,
+        )
+
+
 class PartidaSelectView(discord.ui.View):
     def __init__(self, opcoes: list[discord.SelectOption], permitir_evento: bool = False):
         super().__init__(timeout=300)
@@ -7133,6 +7700,100 @@ async def slash_historico(interaction: discord.Interaction, time: str):
         content=f"📋 **Histórico de {nome_oficial}** — {len(opcoes)} partidas (últimos 90 dias)\nSelecione uma partida para ver os detalhes:",
         view=view,
     )
+
+
+@bot.tree.command(name="saldo", description="Seu saldo de apostas fictícias")
+async def slash_saldo(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not _pode_apostar(interaction.user):
+        await interaction.response.send_message(
+            f"❌ Apenas **{ROLE_BOLEIRO}** ou administradores podem usar apostas.",
+            ephemeral=True,
+        )
+        return
+    loop = asyncio.get_event_loop()
+    ap = await loop.run_in_executor(
+        None,
+        _apostas_ensure,
+        str(interaction.user.id),
+        interaction.user.display_name,
+    )
+    await interaction.response.send_message(embed=_embed_saldo(ap), ephemeral=True)
+
+
+@bot.tree.command(name="apostar", description="Apostar créditos fictícios em uma partida")
+async def slash_apostar(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not _pode_apostar(interaction.user):
+        await interaction.response.send_message(
+            f"❌ Apenas **{ROLE_BOLEIRO}** ou administradores podem apostar.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    loop = asyncio.get_event_loop()
+    eventos = await loop.run_in_executor(None, _bz_eventos_apostaveis)
+    if not eventos:
+        await interaction.followup.send("📭 Nenhuma partida disponível para aposta no momento.")
+        return
+    view = ApostaSelectView(eventos, interaction.user.id, interaction.user.display_name)
+    if not view.children:
+        await interaction.followup.send("📭 Nenhuma partida disponível para aposta.")
+        return
+    await interaction.followup.send(
+        f"🎰 **Apostar** — odd **{APOSTA_ODD:.1f}x** · mín. **{APOSTA_MINIMA}** créditos\n"
+        "Escolha a partida:",
+        view=view,
+    )
+
+
+@bot.tree.command(name="minhas-apostas", description="Suas apostas abertas e recentes")
+async def slash_minhas_apostas(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not _pode_apostar(interaction.user):
+        await interaction.response.send_message(
+            f"❌ Apenas **{ROLE_BOLEIRO}** ou administradores.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    uid = str(interaction.user.id)
+    loop = asyncio.get_event_loop()
+    bets = await loop.run_in_executor(None, _apostas_list_user, uid, 12)
+    if not bets:
+        await interaction.followup.send("📭 Você ainda não fez nenhuma aposta.")
+        return
+
+    status_emoji = {"aberta": "⏳", "ganhou": "✅", "perdeu": "❌", "cancelada": "↩️"}
+    linhas: list[str] = []
+    for b in bets:
+        st = b.get("status", "?")
+        em = status_emoji.get(st, "•")
+        home, away = b.get("home", "?"), b.get("away", "?")
+        pal = b.get("palpite", "?")
+        val = b.get("valor", 0)
+        ret = b.get("retornoPotencial", 0)
+        linhas.append(
+            f"{em} **{home} × {away}** — palpite **{pal}** · **{val:,}** → **{ret:,}** ({st})".replace(",", ".")
+        )
+    embed = discord.Embed(
+        title="🎰 Suas apostas",
+        description="\n".join(linhas[:12]),
+        color=0xF59E0B,
+    )
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="rank-apostas", description="Ranking dos apostadores fictícios")
+@discord.app_commands.describe(criterio="Ordenar por saldo ou lucro")
+@discord.app_commands.choices(criterio=[
+    discord.app_commands.Choice(name="Saldo", value="saldo"),
+    discord.app_commands.Choice(name="Lucro", value="lucro"),
+])
+async def slash_rank_apostas(interaction: discord.Interaction, criterio: str = "saldo"):
+    await interaction.response.defer()
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, _apostas_ranking, criterio, 15)
+    viewer = str(interaction.user.id) if interaction.user else None
+    embed = _embed_ranking(rows, criterio, viewer)
+    await interaction.followup.send(embed=embed)
 
 
 if not TOKEN_DO_DISCORD:
