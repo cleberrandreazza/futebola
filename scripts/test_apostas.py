@@ -34,6 +34,10 @@ def _args(extra: dict | None = None) -> dict:
 
 
 def test_convex_api() -> None:
+    if os.getenv("CONVEX_INTEGRATION", "").strip() != "1":
+        print("SKIP Convex — defina CONVEX_INTEGRATION=1 para testar contra o deployment")
+        return
+
     c = _convex_client()
     if not c:
         print("SKIP Convex — CONVEX_URL não definido")
@@ -52,58 +56,77 @@ def test_convex_api() -> None:
             print(f"FAIL {label}: {e}")
             raise
 
-    step("getSaldo (novo)", lambda: c.query("apostas:getSaldo", _args({"userId": uid})))
-    ap = step(
-        "ensureApostador",
-        lambda: c.mutation(
-            "apostas:ensureApostador",
-            _args({"userId": uid, "displayName": name, "creditoInicial": 1000}),
-        ),
-    )
-    assert ap["saldo"] == 1000, ap
-
-    bet = step(
-        "placeBet",
-        lambda: c.mutation(
-            "apostas:placeBet",
-            _args(
-                {
-                    "userId": uid,
-                    "displayName": name,
-                    "eventId": "test_event_1",
-                    "home": "Time A",
-                    "away": "Time B",
-                    "palpite": "X",
-                    "valor": 25,
-                    "odd": 2.0,
-                    "apostaMinima": 10,
-                    "creditoInicial": 1000,
-                }
+    try:
+        step("getSaldo (novo)", lambda: c.query("apostas:getSaldo", _args({"userId": uid})))
+        ap = step(
+            "ensureApostador",
+            lambda: c.mutation(
+                "apostas:ensureApostador",
+                _args({"userId": uid, "displayName": name, "creditoInicial": 1000}),
             ),
-        ),
-    )
-    assert bet.get("ok"), bet
-    aposta_id = bet["apostaId"]
+        )
+        assert ap["saldo"] == 1000, ap
 
-    saldo = step("getSaldo (após aposta)", lambda: c.query("apostas:getSaldo", _args({"userId": uid})))
-    assert saldo["saldo"] == 975, saldo
+        bet = step(
+            "placeBet",
+            lambda: c.mutation(
+                "apostas:placeBet",
+                _args(
+                    {
+                        "userId": uid,
+                        "displayName": name,
+                        "eventId": "test_event_1",
+                        "home": "Time A",
+                        "away": "Time B",
+                        "palpite": "X",
+                        "valor": 25,
+                        "odd": 2.0,
+                        "apostaMinima": 10,
+                        "creditoInicial": 1000,
+                    }
+                ),
+            ),
+        )
+        assert bet.get("ok"), bet
+        aposta_id = bet["apostaId"]
 
-    step("listOpen", lambda: c.query("apostas:listOpen", _args()))
-    step("listByUser", lambda: c.query("apostas:listByUser", _args({"userId": uid, "limit": 5})))
+        saldo = step(
+            "getSaldo (após aposta)",
+            lambda: c.query("apostas:getSaldo", _args({"userId": uid})),
+        )
+        assert saldo["saldo"] == 975, saldo
 
-    settle = step(
-        "settle (ganhou)",
-        lambda: c.mutation(
-            "apostas:settle",
-            _args({"apostaId": aposta_id, "resultado": "ganhou"}),
-        ),
-    )
-    assert settle.get("ok"), settle
+        step("listOpen", lambda: c.query("apostas:listOpen", _args()))
+        step("listByUser", lambda: c.query("apostas:listByUser", _args({"userId": uid, "limit": 5})))
 
-    final = step("getSaldo (liquidado)", lambda: c.query("apostas:getSaldo", _args({"userId": uid})))
-    assert final["saldo"] == 975 + 50, final  # 25 * 2 retorno
+        settle = step(
+            "settle (ganhou)",
+            lambda: c.mutation(
+                "apostas:settle",
+                _args({"apostaId": aposta_id, "resultado": "ganhou"}),
+            ),
+        )
+        assert settle.get("ok"), settle
 
-    step("getRanking", lambda: c.query("apostas:getRanking", _args({"criterio": "saldo", "limit": 10})))
+        final = step(
+            "getSaldo (liquidado)",
+            lambda: c.query("apostas:getSaldo", _args({"userId": uid})),
+        )
+        assert final["saldo"] == 975 + 50, final
+
+        ranking = step(
+            "getRanking",
+            lambda: c.query("apostas:getRanking", _args({"criterio": "saldo", "limit": 10})),
+        )
+        assert all(
+            str(r.get("userId", "")).isdigit() for r in ranking
+        ), "ranking não deve incluir IDs de teste"
+    finally:
+        purge = c.mutation("apostas:purgeTestApostadores", _args())
+        print(
+            f"OK purgeTestApostadores — {purge.get('apostadoresRemovidos', 0)} apostadores, "
+            f"{purge.get('apostasRemovidas', 0)} apostas"
+        )
 
 
 def test_bot_helpers() -> None:
@@ -111,28 +134,35 @@ def test_bot_helpers() -> None:
     from unittest.mock import patch
 
     uid = f"local_{int(time.time())}"
-    ap = bot._apostas_ensure(uid, "Local Test")
-    assert ap["saldo"] >= bot.CREDITO_INICIAL or ap["saldo"] >= 0
 
-    with patch.object(bot, "_validar_evento_apostavel", return_value={"ok": True, "event": {"status": "notstarted"}}):
-        r = bot._apostas_place(
-            uid, "Local Test", "evt_local", "Casa", "Fora", "1", bot.APOSTA_MINIMA
-        )
-    assert r.get("ok"), r
+    with patch.object(bot, "_convex_client", None):
+        ap = bot._apostas_ensure(uid, "Local Test")
+        assert ap["saldo"] >= bot.CREDITO_INICIAL or ap["saldo"] >= 0
 
-    bets = bot._apostas_list_user(uid, 5)
-    assert bets, "deveria ter aposta aberta"
+        with patch.object(
+            bot,
+            "_validar_evento_apostavel",
+            return_value={"ok": True, "event": {"status": "notstarted"}},
+        ):
+            r = bot._apostas_place(
+                uid, "Local Test", "evt_local", "Casa", "Fora", "1", bot.APOSTA_MINIMA
+            )
+        assert r.get("ok"), r
 
-    ok = bot._apostas_settle(str(bets[0]["_id"]), "cancelada")
-    assert ok, "settle cancelada"
+        bets = bot._apostas_list_user(uid, 5)
+        assert bets, "deveria ter aposta aberta"
 
-    rows = bot._apostas_ranking("saldo", 5)
-    assert isinstance(rows, list)
+        ok = bot._apostas_settle(str(bets[0]["_id"]), "cancelada")
+        assert ok, "settle cancelada"
 
-    embed = bot._embed_saldo(bot._apostas_ensure(uid, "Local Test"))
-    assert embed.title
+        rows = bot._apostas_ranking("saldo", 5)
+        assert isinstance(rows, list)
+        assert not any(r.get("userId") == uid for r in rows), "ranking local ignora IDs não-Discord"
 
-    print("OK bot helpers — ensure, place, list, settle, ranking, embed")
+        embed = bot._embed_saldo(bot._apostas_ensure(uid, "Local Test"))
+        assert embed.title
+
+    print("OK bot helpers — ensure, place, list, settle, ranking, embed (local only)")
 
 
 async def test_slash_saldo_handler() -> None:
@@ -174,8 +204,6 @@ def test_eventos_apostaveis_escopo() -> None:
     import bot
     from unittest.mock import patch
 
-    hoje = datetime.now(tz=bot.BRT).date()
-
     def fake_liga(chave: str):
         if chave == "copadomundo":
             return [{
@@ -188,15 +216,6 @@ def test_eventos_apostaveis_escopo() -> None:
                 "meta": {},
             }]
         return []
-
-    bz_ev = {
-        "id": 9001,
-        "status": "notstarted",
-        "home_team": "South Korea",
-        "away_team": "Czechia",
-        "event_date": datetime.now(tz=bot.BRT).isoformat(),
-        "league_id": 99,
-    }
 
     def bz_get(path, params=None):
         if path == "events/":

@@ -61,6 +61,11 @@ function checkSecret(secret?: string): void {
   }
 }
 
+/** IDs numéricos de snowflake do Discord (17–20 dígitos). */
+function isDiscordUserId(userId: string): boolean {
+  return /^\d{17,20}$/.test(userId);
+}
+
 async function getApostadorDoc(
   ctx: QueryCtx | MutationCtx,
   userId: string
@@ -374,7 +379,9 @@ export const getRanking = query({
   handler: async (ctx, args) => {
     checkSecret(args.secret);
     const lim = Math.min(Math.max(args.limit ?? 15, 1), 50);
-    const docs = await ctx.db.query("apostadores").collect();
+    const docs = (await ctx.db.query("apostadores").collect()).filter((d) =>
+      isDiscordUserId(d.userId)
+    );
     docs.sort((a, b) =>
       args.criterio === "saldo"
         ? b.saldo - a.saldo
@@ -404,6 +411,9 @@ export const creditoSemanal = mutation({
     let creditados = 0;
 
     for (const doc of docs) {
+      if (!isDiscordUserId(doc.userId)) {
+        continue;
+      }
       if (doc.ultimoCreditoSemanal === args.weekKey) {
         continue;
       }
@@ -417,5 +427,36 @@ export const creditoSemanal = mutation({
     }
 
     return { creditados };
+  },
+});
+
+export const purgeTestApostadores = mutation({
+  args: { secret: v.optional(v.string()) },
+  returns: v.object({
+    apostadoresRemovidos: v.number(),
+    apostasRemovidas: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    checkSecret(args.secret);
+
+    let apostasRemovidas = 0;
+    const apostas = await ctx.db.query("apostas").collect();
+    for (const aposta of apostas) {
+      if (!isDiscordUserId(aposta.userId)) {
+        await ctx.db.delete(aposta._id);
+        apostasRemovidas += 1;
+      }
+    }
+
+    let apostadoresRemovidos = 0;
+    const apostadores = await ctx.db.query("apostadores").collect();
+    for (const doc of apostadores) {
+      if (!isDiscordUserId(doc.userId)) {
+        await ctx.db.delete(doc._id);
+        apostadoresRemovidos += 1;
+      }
+    }
+
+    return { apostadoresRemovidos, apostasRemovidas };
   },
 });

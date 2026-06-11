@@ -3889,6 +3889,10 @@ def _palpite_label(p: str, home: str, away: str) -> str:
     return "Empate"
 
 
+def _is_discord_user_id(user_id: str) -> bool:
+    return bool(re.fullmatch(r"\d{17,20}", str(user_id)))
+
+
 def _carregar_apostas_local() -> dict:
     try:
         with open(_APOSTAS_PATH, encoding="utf-8") as f:
@@ -4078,12 +4082,19 @@ def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
     rows = [
         {"userId": uid, **row}
         for uid, row in data["apostadores"].items()
+        if _is_discord_user_id(uid)
     ]
     if criterio == "lucro":
         rows.sort(key=lambda r: r.get("totalGanho", 0), reverse=True)
     else:
         rows.sort(key=lambda r: r.get("saldo", 0), reverse=True)
     return rows[:limit]
+
+
+def _apostas_purge_testes() -> dict | None:
+    if not _convex_client:
+        return None
+    return _convex_mutation("apostas:purgeTestApostadores", {})
 
 
 def _apostas_credito_semanal() -> int:
