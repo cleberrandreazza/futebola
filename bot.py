@@ -3497,12 +3497,24 @@ class FootballCommandTree(discord.app_commands.CommandTree):
         return True
 
 
-def _instalar_hook_interacoes() -> None:
-    """Loga INTERACTION_CREATE no gateway — prova se o Discord envia ao bot."""
+def _instalar_hooks_gateway() -> None:
+    """Loga MESSAGE_CREATE e INTERACTION_CREATE — prova se o Discord envia eventos."""
     conn = bot._connection
-    if getattr(conn, "_hook_interacoes_ok", False):
+    if getattr(conn, "_hooks_gateway_ok", False):
         return
-    original = conn.parse_interaction_create
+
+    orig_msg = conn.parse_message_create
+
+    def parse_message_create(data):
+        author = data.get("author") or {}
+        if not author.get("bot"):
+            content = (data.get("content") or "")[:120]
+            print(f"[Gateway] MESSAGE_CREATE: {content!r}", flush=True)
+        return orig_msg(data)
+
+    conn.parse_message_create = parse_message_create  # type: ignore[method-assign]
+
+    orig_ix = conn.parse_interaction_create
 
     def parse_interaction_create(data):
         itype = data.get("type")
@@ -3512,10 +3524,24 @@ def _instalar_hook_interacoes() -> None:
         elif itype == 3:
             cid = (data.get("data") or {}).get("custom_id", "?")
             print(f"[Gateway] INTERACTION_CREATE component={cid}", flush=True)
-        return original(data)
+        return orig_ix(data)
 
     conn.parse_interaction_create = parse_interaction_create  # type: ignore[method-assign]
-    conn._hook_interacoes_ok = True
+    conn._hooks_gateway_ok = True
+
+
+def _log_intents_startup() -> None:
+    print(
+        f"[Startup] Intents: message_content={bot.intents.message_content} "
+        f"guild_messages={bot.intents.guild_messages}",
+        flush=True,
+    )
+    if bot.intents.message_content:
+        print(
+            "[Startup] Comandos ! exigem 'Message Content Intent' ATIVO no Developer Portal "
+            "→ Bot → Privileged Gateway Intents",
+            flush=True,
+        )
 
 
 def _iniciar_tasks_background():
@@ -3567,12 +3593,24 @@ class FootballBot(commands.Bot):
 
         self.add_view(MenuPrincipalView(persistent=True))
         await _iniciar_servidor_web()
-        _instalar_hook_interacoes()
+        _instalar_hooks_gateway()
+        _log_intents_startup()
 
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guild_messages = True
+intents.guilds = True
 bot = FootballBot(command_prefix="!", intents=intents, tree_cls=FootballCommandTree)
+
+
+@bot.listen("on_message")
+async def _log_mensagem_recebida(message: discord.Message):
+    """Extra listener — não substitui o on_message do commands.Bot."""
+    if message.author.bot or not message.content:
+        return
+    if message.content.startswith("!"):
+        print(f"[Message] !cmd de {message.author} em #{getattr(message.channel, 'name', message.channel.id)}: {message.content[:80]}", flush=True)
 
 
 @bot.event
@@ -6219,6 +6257,12 @@ def _register_liga_commands():
 _register_liga_commands()
 
 
+@bot.command(name="ping")
+async def cmd_ping(ctx):
+    """Teste rápido — responde pong se o bot recebe mensagens !."""
+    await ctx.send("🏓 pong")
+
+
 @bot.command(name="hoje")
 async def cmd_hoje(ctx):
     await _responder_jogos_hoje(ctx=ctx)
@@ -7575,6 +7619,11 @@ async def _time_autocomplete(
         for t in nomes
         if not busca or busca in t.lower()
     ][:25]
+
+
+@bot.tree.command(name="ping", description="Teste — responde pong")
+async def slash_ping(interaction: discord.Interaction):
+    await interaction.response.send_message("🏓 pong", ephemeral=True)
 
 
 @bot.tree.command(name="ajuda", description="Lista todos os comandos do bot")
