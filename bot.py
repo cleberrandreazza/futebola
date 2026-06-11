@@ -3713,6 +3713,49 @@ def _convex_args(extra: dict | None = None) -> dict:
     return args
 
 
+_CONVEX_TIMEOUT_S = float(os.getenv("CONVEX_TIMEOUT_S", "10"))
+
+
+def _convex_query(name: str, extra: dict | None = None):
+    if not _convex_client:
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutTimeout
+
+    def _run():
+        return _convex_client.query(name, _convex_args(extra))
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_run).result(timeout=_CONVEX_TIMEOUT_S)
+    except FutTimeout:
+        print(f"[Convex] Timeout query {name} ({_CONVEX_TIMEOUT_S}s); fallback local.", flush=True)
+        return None
+    except Exception as e:
+        print(f"[Convex] Erro query {name}: {e}", flush=True)
+        return None
+
+
+def _convex_mutation(name: str, extra: dict | None = None):
+    if not _convex_client:
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutTimeout
+
+    def _run():
+        return _convex_client.mutation(name, _convex_args(extra))
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_run).result(timeout=_CONVEX_TIMEOUT_S)
+    except FutTimeout:
+        print(f"[Convex] Timeout mutation {name} ({_CONVEX_TIMEOUT_S}s); fallback local.", flush=True)
+        return None
+    except Exception as e:
+        print(f"[Convex] Erro mutation {name}: {e}", flush=True)
+        return None
+
+
 _PREFS_PADRAO = {"noticias": True, "jogos": True, "lembrete": True}
 LEMBRETE_MIN_ANTES = 25   # minutos antes do apito
 LEMBRETE_MAX_ANTES = 55
@@ -3858,12 +3901,9 @@ def _salvar_apostas_local(data: dict) -> None:
 
 def _apostas_get_saldo(user_id: str) -> dict | None:
     if _convex_client:
-        try:
-            return _convex_client.query(
-                "apostas:getSaldo", _convex_args({"userId": user_id})
-            )
-        except Exception as e:
-            print(f"[Apostas] Erro getSaldo Convex: {e}")
+        row = _convex_query("apostas:getSaldo", {"userId": user_id})
+        if row is not None:
+            return row
     data = _carregar_apostas_local()
     row = data["apostadores"].get(user_id)
     if not row:
@@ -3873,17 +3913,16 @@ def _apostas_get_saldo(user_id: str) -> dict | None:
 
 def _apostas_ensure(user_id: str, display_name: str) -> dict:
     if _convex_client:
-        try:
-            return _convex_client.mutation(
-                "apostas:ensureApostador",
-                _convex_args({
-                    "userId": user_id,
-                    "displayName": display_name,
-                    "creditoInicial": CREDITO_INICIAL,
-                }),
-            )
-        except Exception as e:
-            print(f"[Apostas] Erro ensure Convex: {e}")
+        row = _convex_mutation(
+            "apostas:ensureApostador",
+            {
+                "userId": user_id,
+                "displayName": display_name,
+                "creditoInicial": CREDITO_INICIAL,
+            },
+        )
+        if row is not None:
+            return row
     data = _carregar_apostas_local()
     if user_id not in data["apostadores"]:
         data["apostadores"][user_id] = {
@@ -3913,25 +3952,28 @@ def _apostas_place(
     palpite: str,
     valor: int,
 ) -> dict:
+    chk = _validar_evento_apostavel(event_id)
+    if not chk.get("ok"):
+        return {"ok": False, "error": chk.get("error", "Partida indisponível para aposta.")}
+
     if _convex_client:
-        try:
-            return _convex_client.mutation(
-                "apostas:placeBet",
-                _convex_args({
-                    "userId": user_id,
-                    "displayName": display_name,
-                    "eventId": event_id,
-                    "home": home,
-                    "away": away,
-                    "palpite": palpite,
-                    "valor": valor,
-                    "odd": APOSTA_ODD,
-                    "apostaMinima": APOSTA_MINIMA,
-                    "creditoInicial": CREDITO_INICIAL,
-                }),
-            )
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        r = _convex_mutation(
+            "apostas:placeBet",
+            {
+                "userId": user_id,
+                "displayName": display_name,
+                "eventId": event_id,
+                "home": home,
+                "away": away,
+                "palpite": palpite,
+                "valor": valor,
+                "odd": APOSTA_ODD,
+                "apostaMinima": APOSTA_MINIMA,
+                "creditoInicial": CREDITO_INICIAL,
+            },
+        )
+        if r is not None:
+            return r
 
     data = _carregar_apostas_local()
     _apostas_ensure(user_id, display_name)
@@ -3971,24 +4013,18 @@ def _apostas_place(
 
 def _apostas_list_open() -> list[dict]:
     if _convex_client:
-        try:
-            return _convex_client.query("apostas:listOpen", _convex_args()) or []
-        except Exception as e:
-            print(f"[Apostas] Erro listOpen: {e}")
-            return []
+        rows = _convex_query("apostas:listOpen")
+        if rows is not None:
+            return rows or []
     data = _carregar_apostas_local()
     return [b for b in data["apostas"] if b.get("status") == "aberta"]
 
 
 def _apostas_list_user(user_id: str, limit: int = 10) -> list[dict]:
     if _convex_client:
-        try:
-            return _convex_client.query(
-                "apostas:listByUser",
-                _convex_args({"userId": user_id, "limit": limit}),
-            ) or []
-        except Exception as e:
-            print(f"[Apostas] Erro listByUser: {e}")
+        rows = _convex_query("apostas:listByUser", {"userId": user_id, "limit": limit})
+        if rows is not None:
+            return rows or []
     data = _carregar_apostas_local()
     bets = [b for b in data["apostas"] if b["userId"] == user_id]
     bets.sort(key=lambda b: b.get("criadaEm", 0), reverse=True)
@@ -3997,15 +4033,12 @@ def _apostas_list_user(user_id: str, limit: int = 10) -> list[dict]:
 
 def _apostas_settle(aposta_id: str, resultado: str) -> bool:
     if _convex_client:
-        try:
-            r = _convex_client.mutation(
-                "apostas:settle",
-                _convex_args({"apostaId": aposta_id, "resultado": resultado}),
-            )
-            return bool(r and r.get("ok"))
-        except Exception as e:
-            print(f"[Apostas] Erro settle Convex: {e}")
-            return False
+        r = _convex_mutation(
+            "apostas:settle",
+            {"apostaId": aposta_id, "resultado": resultado},
+        )
+        if r is not None:
+            return bool(r.get("ok"))
 
     data = _carregar_apostas_local()
     bet = next((b for b in data["apostas"] if b.get("_id") == aposta_id), None)
@@ -4031,13 +4064,9 @@ def _apostas_settle(aposta_id: str, resultado: str) -> bool:
 
 def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
     if _convex_client:
-        try:
-            return _convex_client.query(
-                "apostas:getRanking",
-                _convex_args({"criterio": criterio, "limit": limit}),
-            ) or []
-        except Exception as e:
-            print(f"[Apostas] Erro ranking: {e}")
+        rows = _convex_query("apostas:getRanking", {"criterio": criterio, "limit": limit})
+        if rows is not None:
+            return rows or []
     data = _carregar_apostas_local()
     rows = [
         {"userId": uid, **row}
@@ -4053,15 +4082,12 @@ def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
 def _apostas_credito_semanal() -> int:
     week = _iso_week_key()
     if _convex_client:
-        try:
-            r = _convex_client.mutation(
-                "apostas:creditoSemanal",
-                _convex_args({"weekKey": week, "credito": CREDITO_SEMANAL}),
-            )
-            return int((r or {}).get("creditados", 0))
-        except Exception as e:
-            print(f"[Apostas] Erro creditoSemanal Convex: {e}")
-            return 0
+        r = _convex_mutation(
+            "apostas:creditoSemanal",
+            {"weekKey": week, "credito": CREDITO_SEMANAL},
+        )
+        if r is not None:
+            return int(r.get("creditados", 0))
 
     data = _carregar_apostas_local()
     n = 0
@@ -4074,6 +4100,28 @@ def _apostas_credito_semanal() -> int:
     if n:
         _salvar_apostas_local(data)
     return n
+
+
+def _evento_e_apostavel(ev: dict) -> bool:
+    """Apostas só em partidas que ainda não iniciaram (status Bzzoiro: notstarted)."""
+    return ev.get("status", "notstarted") == "notstarted"
+
+
+def _validar_evento_apostavel(event_id: str) -> dict:
+    """Consulta o Bzzoiro e recusa jogos já iniciados, encerrados ou cancelados."""
+    ev = _bzzoiro_get(f"events/{event_id}/")
+    if not ev or ev.get("error"):
+        return {"ok": False, "error": "Partida não encontrada."}
+    if _evento_e_apostavel(ev):
+        return {"ok": True, "event": ev}
+    st = ev.get("status", "?")
+    if st == "finished":
+        msg = "Esta partida já foi encerrada — apostas não são permitidas."
+    elif st in ("cancelled", "postponed", "abandoned", "deleted", "awarded"):
+        msg = "Esta partida foi cancelada ou adiada — apostas não são permitidas."
+    else:
+        msg = "Esta partida já começou — apostas só antes do apito inicial."
+    return {"ok": False, "error": msg, "event": ev}
 
 
 def _bz_eventos_apostaveis() -> list[dict]:
@@ -4104,7 +4152,7 @@ def _bz_eventos_apostaveis() -> list[dict]:
         eid = ev.get("id")
         if not eid or eid in seen:
             continue
-        if ev.get("status", "notstarted") != "notstarted":
+        if not _evento_e_apostavel(ev):
             continue
         seen.add(eid)
         out.append(ev)
@@ -6660,7 +6708,7 @@ def _build_ajuda_embed() -> discord.Embed:
         name="🎰  Apostas fictícias (cargo Boleiros / Admin)",
         value=(
             "`/saldo` — Seu saldo e estatísticas\n"
-            "`/apostar` — Apostar em partidas futuras (1 / X / 2)\n"
+            "`/apostar` — Apostar em partidas que **ainda não iniciaram** (1 / X / 2)\n"
             "`/minhas-apostas` — Apostas abertas e recentes\n"
             "`/rank-apostas` — Ranking por saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
@@ -7317,6 +7365,17 @@ class ApostaPalpiteView(discord.ui.View):
         if interaction.user.id != self.uid:
             await interaction.response.send_message("❌ Não é sua aposta.", ephemeral=True)
             return
+        loop = asyncio.get_event_loop()
+        chk = await loop.run_in_executor(
+            None, _validar_evento_apostavel, str(self.ev.get("id"))
+        )
+        if not chk.get("ok"):
+            await interaction.response.send_message(
+                f"❌ {chk.get('error', 'Partida indisponível.')}", ephemeral=True
+            )
+            return
+        if chk.get("event"):
+            self.ev = chk["event"]
         await interaction.response.send_modal(
             ApostaValorModal(self.ev, palpite, self.uid, self.display_name)
         )
@@ -7347,6 +7406,15 @@ class ApostaSelectView(discord.ui.View):
         if not ev:
             await interaction.response.send_message("❌ Partida não encontrada.", ephemeral=True)
             return
+        loop = asyncio.get_event_loop()
+        chk = await loop.run_in_executor(None, _validar_evento_apostavel, eid)
+        if not chk.get("ok"):
+            await interaction.response.send_message(
+                f"❌ {chk.get('error', 'Partida indisponível.')}", ephemeral=True
+            )
+            return
+        if chk.get("event"):
+            ev = chk["event"]
         home = ev.get("home_team", "?")
         away = ev.get("away_team", "?")
         view = ApostaPalpiteView(ev, self.uid, self.display_name)
@@ -7944,7 +8012,7 @@ async def slash_saldo(interaction: discord.Interaction):
     await interaction.followup.send(embed=_embed_saldo(ap), ephemeral=True)
 
 
-@bot.tree.command(name="apostar", description="Apostar créditos fictícios em uma partida")
+@bot.tree.command(name="apostar", description="Apostar em partida que ainda não iniciou")
 async def slash_apostar(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member) or not _pode_apostar(interaction.user):
         await interaction.response.send_message(
@@ -7964,6 +8032,7 @@ async def slash_apostar(interaction: discord.Interaction):
         return
     await interaction.followup.send(
         f"🎰 **Apostar** — odd **{APOSTA_ODD:.1f}x** · mín. **{APOSTA_MINIMA}** créditos\n"
+        "Somente partidas que **ainda não iniciaram**.\n"
         "Escolha a partida:",
         view=view,
     )
