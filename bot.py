@@ -3482,24 +3482,6 @@ class FootballCommandTree(discord.app_commands.CommandTree):
         return True
 
 
-def _verificar_config_discord() -> None:
-    """Alerta se o app Discord estiver configurado para HTTP em vez do gateway."""
-    app = bot.application
-    if app is None:
-        return
-    endpoint = app.interactions_endpoint_url
-    if endpoint:
-        print("=" * 70)
-        print("[ERRO CRÍTICO] Interactions Endpoint URL configurado no Discord Developer Portal:")
-        print(f"  {endpoint}")
-        print("Com discord.py os slash commands NÃO chegam ao bot — ficam sem resposta.")
-        print("Correção: https://discord.com/developers/applications → General →")
-        print("  Interactions Endpoint URL → APAGUE o campo → Save Changes")
-        print("=" * 70)
-    else:
-        print("[Startup] Interactions Endpoint URL: (vazio) — OK para gateway")
-
-
 def _iniciar_tasks_background():
     """Inicia tasks pesadas uma única vez, após sync de slash commands."""
     if getattr(bot, "_tasks_started", False):
@@ -3522,6 +3504,28 @@ def _iniciar_tasks_background():
 
 class FootballBot(commands.Bot):
     async def setup_hook(self):
+        app = self.application
+        if app:
+            print(f"[Startup] Discord App ID: {app.id}")
+            endpoint = app.interactions_endpoint_url
+            if endpoint:
+                print("=" * 70)
+                print("[ERRO CRÍTICO] Interactions Endpoint URL detectado no Discord:")
+                print(f"  {endpoint}")
+                print("Slash commands vão para essa URL — o bot discord.py NÃO os recebe.")
+                print("Tentando remover automaticamente...")
+                try:
+                    await app.edit(interactions_endpoint_url=None)
+                    print("[Startup] Interactions Endpoint URL REMOVIDO — reinicie o bot se necessário.")
+                except Exception as e:
+                    print(f"[Startup] Falha ao remover endpoint via API: {e}")
+                    print("Apague manualmente: Developer Portal → General → Interactions Endpoint URL")
+                print("=" * 70)
+            else:
+                print("[Startup] Interactions Endpoint URL: (vazio) — OK para gateway")
+        else:
+            print("[Startup] AVISO: application info indisponível no setup_hook")
+
         self.add_view(MenuPrincipalView(persistent=True))
         await _iniciar_servidor_web()
 
@@ -3542,8 +3546,7 @@ async def on_interaction(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
-    print(f"Bot online: {bot.user}")
-    _verificar_config_discord()
+    print(f"Bot online: {bot.user} · App ID: {bot.application_id}")
     if getattr(bot, "_startup_done", False):
         return
     if getattr(bot, "_startup_running", False):
