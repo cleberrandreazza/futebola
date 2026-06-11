@@ -21,6 +21,7 @@ os.environ.setdefault("TOKEN_DISCORD", "test-token-local-smoke")
 def test_import_and_commands() -> None:
     import bot  # noqa: WPS433
 
+    assert isinstance(bot.bot.tree, bot.FootballCommandTree)
     cmds = bot.bot.tree.get_commands()
     names = {c.name for c in cmds}
     assert len(cmds) >= 18, f"Esperava >=18 slash commands, got {len(cmds)}"

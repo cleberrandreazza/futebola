@@ -3469,6 +3469,37 @@ async def _iniciar_servidor_web():
 # BOT DISCORD
 # ==========================================
 
+class FootballCommandTree(discord.app_commands.CommandTree):
+    """CommandTree com logging — interaction_check é método, não decorator (discord.py 2.7+)."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        name = "?"
+        if interaction.command:
+            name = interaction.command.name
+        elif interaction.data and isinstance(interaction.data, dict):
+            name = interaction.data.get("name", name)
+        print(f"[Slash] /{name} ← {interaction.user} (guild {interaction.guild_id})")
+        return True
+
+
+def _verificar_config_discord() -> None:
+    """Alerta se o app Discord estiver configurado para HTTP em vez do gateway."""
+    app = bot.application
+    if app is None:
+        return
+    endpoint = app.interactions_endpoint_url
+    if endpoint:
+        print("=" * 70)
+        print("[ERRO CRÍTICO] Interactions Endpoint URL configurado no Discord Developer Portal:")
+        print(f"  {endpoint}")
+        print("Com discord.py os slash commands NÃO chegam ao bot — ficam sem resposta.")
+        print("Correção: https://discord.com/developers/applications → General →")
+        print("  Interactions Endpoint URL → APAGUE o campo → Save Changes")
+        print("=" * 70)
+    else:
+        print("[Startup] Interactions Endpoint URL: (vazio) — OK para gateway")
+
+
 def _iniciar_tasks_background():
     """Inicia tasks pesadas uma única vez, após sync de slash commands."""
     if getattr(bot, "_tasks_started", False):
@@ -3497,12 +3528,22 @@ class FootballBot(commands.Bot):
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = FootballBot(command_prefix="!", intents=intents)
+bot = FootballBot(command_prefix="!", intents=intents, tree_cls=FootballCommandTree)
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Log bruto — se não aparecer ao usar /hoje, a interação não chegou via gateway."""
+    if interaction.type is discord.InteractionType.application_command:
+        data = interaction.data if isinstance(interaction.data, dict) else {}
+        name = data.get("name", "?")
+        print(f"[Interaction] recebida /{name} de {interaction.user}")
 
 
 @bot.event
 async def on_ready():
     print(f"Bot online: {bot.user}")
+    _verificar_config_discord()
     if getattr(bot, "_startup_done", False):
         return
     if getattr(bot, "_startup_running", False):
@@ -3536,13 +3577,6 @@ async def _startup_pos_ready():
         bot._startup_done = True
         bot._startup_running = False
         print("[Startup] Concluído — bot pronto para comandos.")
-
-
-@bot.tree.interaction_check
-async def _log_slash_interaction(interaction: discord.Interaction) -> bool:
-    cmd = interaction.command.name if interaction.command else "?"
-    print(f"[Slash] /{cmd} ← {interaction.user} (guild {interaction.guild_id})")
-    return True
 
 
 @bot.tree.error
