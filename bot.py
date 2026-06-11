@@ -32,6 +32,7 @@ BRT               = timezone(timedelta(hours=-3))
 HORARIO_RESUMO    = __import__("datetime").time(
     int(_hora_env[0]), int(_hora_env[1]), tzinfo=BRT
 )
+HORARIO_CREDITO_APOSTAS = __import__("datetime").time(0, 5, tzinfo=BRT)
 
 # Cache HTTP (reduz chamadas repetidas em tasks e monitoramento)
 _API_CACHE: dict[str, tuple[float, object]] = {}
@@ -4355,7 +4356,7 @@ async def _before_liquidar_apostas():
     await bot.wait_until_ready()
 
 
-@tasks.loop(time=datetime.time(hour=0, minute=5, tzinfo=BRT))
+@tasks.loop(time=HORARIO_CREDITO_APOSTAS)
 async def credito_semanal_apostas():
     if datetime.now(tz=BRT).weekday() != 0:
         return
