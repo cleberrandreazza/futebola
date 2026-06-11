@@ -3472,6 +3472,29 @@ async def _proxy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
         )
 
 
+_LEGAL_DIR = os.path.join(os.path.dirname(__file__), "legal")
+_LEGAL_PAGES = frozenset({"terms-of-service", "privacy-policy"})
+
+
+async def _legal_page_handler(request: aiohttp_web.Request, slug: str) -> aiohttp_web.Response:
+    if slug not in _LEGAL_PAGES:
+        return aiohttp_web.Response(status=404, text="Not found")
+    path = os.path.join(_LEGAL_DIR, f"{slug}.html")
+    if not os.path.isfile(path):
+        return aiohttp_web.Response(status=404, text="Not found")
+    with open(path, encoding="utf-8") as f:
+        html = f.read()
+    return aiohttp_web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def _legal_terms_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    return await _legal_page_handler(request, "terms-of-service")
+
+
+async def _legal_privacy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    return await _legal_page_handler(request, "privacy-policy")
+
+
 async def _iniciar_servidor_web():
     @aiohttp_web.middleware
     async def log_requests(request, handler):
@@ -3481,6 +3504,8 @@ async def _iniciar_servidor_web():
 
     app = aiohttp_web.Application(middlewares=[log_requests])
     app.router.add_get("/health", lambda _r: aiohttp_web.Response(text="ok"))
+    app.router.add_get("/terms-of-service", _legal_terms_handler)
+    app.router.add_get("/privacy-policy", _legal_privacy_handler)
     app.router.add_get("/player/{token}",   _web_player_handler)
     app.router.add_get("/partida/{token}", _web_partida_html_handler)
     app.router.add_get("/api/live/{token}", _web_live_api_handler)
