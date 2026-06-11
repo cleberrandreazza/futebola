@@ -21,9 +21,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN_DO_DISCORD  = os.getenv("TOKEN_DISCORD")
-CANAL_RESUMO_ID   = int(os.getenv("CANAL_JOGOS_DO_DIA", "0"))
-CANAL_EVENTO_ID   = int(os.getenv("CANAL_EVENTO", "1510344579927249017"))
-CANAL_COMANDOS_ID = int(os.getenv("CANAL_COMANDOS", "0"))
+def _env_int(name: str, default: str = "0") -> int:
+    return int(os.getenv(name) or default)
+
+
+CANAL_RESUMO_ID   = _env_int("CANAL_JOGOS_DO_DIA")
+CANAL_EVENTO_ID   = _env_int("CANAL_EVENTO", "1510344579927249017")
+CANAL_COMANDOS_ID = _env_int("CANAL_COMANDOS")
 # Railway injeta PORT automaticamente; localmente usa SERVER_PORT ou 8080
 SERVER_PORT       = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
 SERVER_URL        = os.getenv("SERVER_URL", f"http://localhost:{SERVER_PORT}")
@@ -3663,6 +3667,17 @@ def _salvar_seguindo(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+async def _salvar_seguindo_async(data: dict) -> None:
+    """Persiste seguidores sem bloquear o event loop (Convex é síncrono)."""
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, _salvar_seguindo, data),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        print("[Convex] Timeout ao salvar seguidores (20s)")
+
+
 _SEGUINDO: dict = _carregar_seguindo()
 # event_id → {home, away, slug, user_ids: set, eventos: set, encerrado: bool, notif_inicio: bool}
 _JOGOS_TIMES: dict = {}
@@ -4435,6 +4450,7 @@ async def verificar_noticias_times():
     """A cada 30 min verifica novidades para os times seguidos e envia DM."""
     if not _SEGUINDO:
         return
+    salvar_global = False
     for uid_str, dados in list(_SEGUINDO.items()):
         if not _prefs_de(dados).get("noticias", True):
             continue
@@ -4463,7 +4479,9 @@ async def verificar_noticias_times():
                 print(f"[Noticias] {uid_str}/{time}: {e}")
         if salvar:
             dados["noticias_vistas"] = vistas
-    _salvar_seguindo(_SEGUINDO)
+            salvar_global = True
+    if salvar_global:
+        await _salvar_seguindo_async(_SEGUINDO)
 
 
 @tasks.loop(minutes=10)
@@ -4520,7 +4538,7 @@ async def lembrete_pre_jogo():
             dados["lembretes_enviados"] = list(enviados)[-150:]
             salvar = True
     if salvar:
-        _salvar_seguindo(_SEGUINDO)
+        await _salvar_seguindo_async(_SEGUINDO)
 
 
 @tasks.loop(minutes=2)
@@ -5009,7 +5027,7 @@ class SeguindoView(discord.ui.View):
         if not time_sel:
             await interaction.response.send_message("Selecione um time primeiro.", ephemeral=True)
             return
-        msg = _executar_deixar(interaction.user, time_sel)
+        msg = await _executar_deixar(interaction.user, time_sel)
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(content=msg, view=None)
@@ -5386,7 +5404,7 @@ async def _executar_notificacoes(
     else:
         return "❌ Estado inválido. Use `ligar` ou `desligar`."
     dados["prefs"] = prefs
-    _salvar_seguindo(_SEGUINDO)
+    await _salvar_seguindo_async(_SEGUINDO)
     return f"✅ **{t}** {'ativado' if prefs[t] else 'desativado'}."
 
 
@@ -5396,7 +5414,8 @@ async def _executar_seguir(user: discord.abc.User, time: str) -> str:
     if not time:
         return "❌ Informe o nome do time."
     if BZZOIRO_TOKEN:
-        resolvido = _bz_resolve_team(time)
+        loop = asyncio.get_running_loop()
+        resolvido = await loop.run_in_executor(None, _bz_resolve_team, time)
         if resolvido:
             _, time = resolvido
         else:
@@ -5415,7 +5434,7 @@ async def _executar_seguir(user: discord.abc.User, time: str) -> str:
            for t in dados.get("times", [])):
         return f"📌 Você já segue **{time}**. Use `!seguindo` ou o menu **Meus times**."
     dados.setdefault("times", []).append(time)
-    _salvar_seguindo(_SEGUINDO)
+    await _salvar_seguindo_async(_SEGUINDO)
     prefs = _prefs_de(dados)
     linhas = []
     if prefs["noticias"]:
@@ -5442,14 +5461,15 @@ async def _executar_seguir(user: discord.abc.User, time: str) -> str:
         )
 
 
-def _executar_deixar(user: discord.abc.User, time: str) -> str:
+async def _executar_deixar(user: discord.abc.User, time: str) -> str:
     """Remove time da lista seguida. Retorna mensagem para o usuário."""
     time = (time or "").strip()
     if not time:
         return "❌ Informe o nome do time."
     busca = time
     if BZZOIRO_TOKEN:
-        resolvido = _bz_resolve_team(time)
+        loop = asyncio.get_running_loop()
+        resolvido = await loop.run_in_executor(None, _bz_resolve_team, time)
         if resolvido:
             _, busca = resolvido
     uid_str = str(user.id)
@@ -5467,7 +5487,7 @@ def _executar_deixar(user: discord.abc.User, time: str) -> str:
     if not match:
         return f"❌ Você não está seguindo **{time}**. Use `!seguindo` ou `/deixar`."
     times.remove(match)
-    _salvar_seguindo(_SEGUINDO)
+    await _salvar_seguindo_async(_SEGUINDO)
     return f"✅ Você deixou de seguir **{match}**."
 
 
@@ -6174,7 +6194,7 @@ async def cmd_deixar(ctx, *, time: str = ""):
     if not time:
         await _responder_seguindo(ctx.author, ctx=ctx)
         return
-    await ctx.send(_executar_deixar(ctx.author, time.strip()))
+    await ctx.send(await _executar_deixar(ctx.author, time.strip()))
 
 
 @bot.command(name="seguindo")
@@ -7509,7 +7529,7 @@ async def slash_deixar(interaction: discord.Interaction, time: str = ""):
     if not time.strip():
         await _responder_seguindo(interaction.user, interaction=interaction)
         return
-    msg = _executar_deixar(interaction.user, time.strip())
+    msg = await _executar_deixar(interaction.user, time.strip())
     await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -7867,7 +7887,7 @@ async def slash_rank_apostas(interaction: discord.Interaction, criterio: str = "
     await interaction.followup.send(embed=embed)
 
 
-if not TOKEN_DO_DISCORD:
-    raise SystemExit("ERRO: TOKEN_DISCORD não encontrado. Verifique o nome exato da variável no Railway.")
-
-bot.run(TOKEN_DO_DISCORD)
+if __name__ == "__main__":
+    if not TOKEN_DO_DISCORD:
+        raise SystemExit("ERRO: TOKEN_DISCORD não encontrado. Verifique o nome exato da variável no Railway.")
+    bot.run(TOKEN_DO_DISCORD)
