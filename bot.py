@@ -31,6 +31,8 @@ CANAL_COMANDOS_ID = _env_int("CANAL_COMANDOS")
 # Railway injeta PORT automaticamente; localmente usa SERVER_PORT ou 8080
 SERVER_PORT       = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
 SERVER_URL        = os.getenv("SERVER_URL", f"http://localhost:{SERVER_PORT}")
+DISCORD_GUILD_ID  = _env_int("DISCORD_GUILD_ID")
+SKIP_TASKS        = os.getenv("SKIP_TASKS", "").strip().lower() in ("1", "true", "yes")
 _hora_env         = os.getenv("HORA_RESUMO_DIARIO", "09:00").split(":")
 BRT               = timezone(timedelta(hours=-3))
 HORARIO_RESUMO    = __import__("datetime").time(
@@ -3450,7 +3452,14 @@ async def _proxy_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
 
 
 async def _iniciar_servidor_web():
-    app = aiohttp_web.Application()
+    @aiohttp_web.middleware
+    async def log_requests(request, handler):
+        if request.method != "GET" or request.path not in ("/", "/health"):
+            print(f"[HTTP] {request.method} {request.path}", flush=True)
+        return await handler(request)
+
+    app = aiohttp_web.Application(middlewares=[log_requests])
+    app.router.add_get("/health", lambda _r: aiohttp_web.Response(text="ok"))
     app.router.add_get("/player/{token}",   _web_player_handler)
     app.router.add_get("/partida/{token}", _web_partida_html_handler)
     app.router.add_get("/api/live/{token}", _web_live_api_handler)
@@ -3473,18 +3482,48 @@ class FootballCommandTree(discord.app_commands.CommandTree):
     """CommandTree com logging — interaction_check é método, não decorator (discord.py 2.7+)."""
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        name = "?"
-        if interaction.command:
-            name = interaction.command.name
-        elif interaction.data and isinstance(interaction.data, dict):
-            name = interaction.data.get("name", name)
-        print(f"[Slash] /{name} ← {interaction.user} (guild {interaction.guild_id})")
+        try:
+            name = "?"
+            if interaction.command:
+                name = interaction.command.name
+            elif interaction.data and isinstance(interaction.data, dict):
+                name = interaction.data.get("name", name)
+            print(
+                f"[Slash] /{name} ← {interaction.user} (guild {interaction.guild_id})",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[Slash] interaction_check log error: {e}", flush=True)
         return True
+
+
+def _instalar_hook_interacoes() -> None:
+    """Loga INTERACTION_CREATE no gateway — prova se o Discord envia ao bot."""
+    conn = bot._connection
+    if getattr(conn, "_hook_interacoes_ok", False):
+        return
+    original = conn.parse_interaction_create
+
+    def parse_interaction_create(data):
+        itype = data.get("type")
+        if itype in (2, 4):
+            name = (data.get("data") or {}).get("name", "?")
+            print(f"[Gateway] INTERACTION_CREATE type={itype} cmd={name}", flush=True)
+        elif itype == 3:
+            cid = (data.get("data") or {}).get("custom_id", "?")
+            print(f"[Gateway] INTERACTION_CREATE component={cid}", flush=True)
+        return original(data)
+
+    conn.parse_interaction_create = parse_interaction_create  # type: ignore[method-assign]
+    conn._hook_interacoes_ok = True
 
 
 def _iniciar_tasks_background():
     """Inicia tasks pesadas uma única vez, após sync de slash commands."""
     if getattr(bot, "_tasks_started", False):
+        return
+    if SKIP_TASKS:
+        print("[Startup] SKIP_TASKS=1 — tasks em background desativadas", flush=True)
         return
     bot._tasks_started = True
     checar_jogos_ao_vivo.start()
@@ -3528,6 +3567,7 @@ class FootballBot(commands.Bot):
 
         self.add_view(MenuPrincipalView(persistent=True))
         await _iniciar_servidor_web()
+        _instalar_hook_interacoes()
 
 
 intents = discord.Intents.default()
@@ -3536,17 +3576,8 @@ bot = FootballBot(command_prefix="!", intents=intents, tree_cls=FootballCommandT
 
 
 @bot.event
-async def on_interaction(interaction: discord.Interaction):
-    """Log bruto — se não aparecer ao usar /hoje, a interação não chegou via gateway."""
-    if interaction.type is discord.InteractionType.application_command:
-        data = interaction.data if isinstance(interaction.data, dict) else {}
-        name = data.get("name", "?")
-        print(f"[Interaction] recebida /{name} de {interaction.user}")
-
-
-@bot.event
 async def on_ready():
-    print(f"Bot online: {bot.user} · App ID: {bot.application_id}")
+    print(f"Bot online: {bot.user} · App ID: {bot.application_id}", flush=True)
     if getattr(bot, "_startup_done", False):
         return
     if getattr(bot, "_startup_running", False):
@@ -3558,14 +3589,30 @@ async def on_ready():
 async def _startup_pos_ready():
     """Sync de slash commands e menu — em background para não bloquear interações."""
     try:
-        print("[Startup] Sincronizando slash commands...")
+        print("[Startup] Sincronizando slash commands...", flush=True)
+        guild_obj: discord.Object | None = None
+        guild_id = DISCORD_GUILD_ID
+        if not guild_id and CANAL_EVENTO_ID:
+            try:
+                ch = bot.get_channel(CANAL_EVENTO_ID) or await bot.fetch_channel(CANAL_EVENTO_ID)
+                if isinstance(ch, discord.abc.GuildChannel):
+                    guild_id = ch.guild.id
+            except Exception as e:
+                print(f"[Startup] Não foi possível resolver guild pelo canal: {e}", flush=True)
+        if guild_id:
+            guild_obj = discord.Object(id=guild_id)
+            bot.tree.copy_global_to(guild=guild_obj)
+            print(f"[Startup] Sync guild {guild_id}...", flush=True)
         try:
-            synced = await asyncio.wait_for(bot.tree.sync(), timeout=90.0)
-            print(f"[Startup] Slash commands sincronizados: {len(synced)}")
+            if guild_obj:
+                synced = await asyncio.wait_for(bot.tree.sync(guild=guild_obj), timeout=90.0)
+            else:
+                synced = await asyncio.wait_for(bot.tree.sync(), timeout=90.0)
+            print(f"[Startup] Slash commands sincronizados: {len(synced)}", flush=True)
         except asyncio.TimeoutError:
-            print("[Startup] tree.sync() timeout (90s) — comandos podem estar desatualizados")
+            print("[Startup] tree.sync() timeout (90s)", flush=True)
         except Exception as e:
-            print(f"[Startup] Erro ao sincronizar slash commands: {e}")
+            print(f"[Startup] Erro ao sincronizar slash commands: {e}", flush=True)
         if BZZOIRO_TOKEN:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _bz_build_team_map)
