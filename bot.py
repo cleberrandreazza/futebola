@@ -3491,6 +3491,12 @@ bot = FootballBot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f"Bot online: {bot.user}")
+    if not getattr(bot, "_startup_done", False):
+        asyncio.create_task(_startup_pos_ready())
+
+
+async def _startup_pos_ready():
+    """Sync de slash commands e menu — em background para não bloquear interações."""
     try:
         synced = await bot.tree.sync()
         print(f"Slash commands sincronizados: {len(synced)}")
@@ -3500,6 +3506,23 @@ async def on_ready():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _bz_build_team_map)
     await _publicar_menu_canal()
+    bot._startup_done = True
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    cmd = interaction.command.name if interaction.command else "?"
+    print(f"[Slash] Erro em /{cmd}: {error}")
+    import traceback
+    traceback.print_exception(type(error), error, error.__traceback__)
+    msg = "❌ Erro ao processar o comando. Tente novamente."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
 
 
 # ==========================================
@@ -5458,36 +5481,46 @@ async def _responder_jogos_hoje(
     elif ctx:
         msg = await ctx.send("📅 Buscando jogos do dia em todas as ligas...")
 
-    loop = asyncio.get_event_loop()
-    jogos_por_liga = await _buscar_jogos_resumo_paralelo()
+    try:
+        loop = asyncio.get_event_loop()
+        jogos_por_liga = await _buscar_jogos_resumo_paralelo()
 
-    if not jogos_por_liga:
-        texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
+        if not jogos_por_liga:
+            texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
+            if interaction:
+                await interaction.followup.send(texto)
+            elif msg:
+                await msg.edit(content=texto)
+            return
+
+        total = sum(len(v) for v in jogos_por_liga.values())
+        img   = await gerar_resumo_diario_png(jogos_por_liga)
+        bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
+        view = None
+        if bz_events:
+            opcoes = _build_partida_options(bz_events)
+            if opcoes:
+                view = PartidaSelectView(opcoes, permitir_evento=True)
+
+        content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
+        arquivo = discord.File(img)
+        send_kw = {"content": content, "file": arquivo}
+        if view is not None:
+            send_kw["view"] = view
         if interaction:
-            await interaction.followup.send(texto)
+            await interaction.followup.send(**send_kw)
+        else:
+            await msg.delete()
+            await ctx.send(**send_kw)
+    except Exception as e:
+        print(f"[Hoje] Erro: {e}")
+        import traceback
+        traceback.print_exc()
+        err = f"❌ Erro ao buscar jogos do dia: `{e}`"
+        if interaction:
+            await interaction.followup.send(err)
         elif msg:
-            await msg.edit(content=texto)
-        return
-
-    total = sum(len(v) for v in jogos_por_liga.values())
-    img   = await gerar_resumo_diario_png(jogos_por_liga)
-    bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
-    view = None
-    if bz_events:
-        opcoes = _build_partida_options(bz_events)
-        if opcoes:
-            view = PartidaSelectView(opcoes, permitir_evento=True)
-
-    content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
-    arquivo = discord.File(img)
-    send_kw = {"content": content, "file": arquivo}
-    if view is not None:
-        send_kw["view"] = view
-    if interaction:
-        await interaction.followup.send(**send_kw)
-    else:
-        await msg.delete()
-        await ctx.send(**send_kw)
+            await msg.edit(content=err)
 
 
 async def _responder_calendario_data(
@@ -7452,6 +7485,7 @@ async def slash_seguindo(interaction: discord.Interaction):
 
 @bot.tree.command(name="hoje", description="Jogos de hoje em todas as ligas monitoradas")
 async def slash_hoje(interaction: discord.Interaction):
+    await interaction.response.defer()
     await _responder_jogos_hoje(interaction=interaction)
 
 

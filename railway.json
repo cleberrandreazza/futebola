@@ -1,8 +1,9 @@
 {
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "NIXPACKS",
+    "buildCommand": "pip install -r requirements.txt && playwright install --with-deps chromium"
   },
   "deploy": {
-    "startCommand": "playwright install --with-deps chromium && python bot.py"
+    "startCommand": "python bot.py"
   }
 }
