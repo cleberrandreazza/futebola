@@ -1,5 +1,8 @@
 name: Deploy to Railway
 
+# Com Source → GitHub no Railway (auto-deploy em main), o bot NÃO precisa deste job.
+# Este workflow só complementa: deploy Convex via CI (opcional) ou Railway CLI (se secrets existirem).
+
 on:
   push:
     branches:
@@ -11,32 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Deploy bot to Railway
+      - name: Railway CLI deploy (opcional — só se usar secrets)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::RAILWAY_TOKEN não configurado — deploy ignorado."
-            echo "Configure em GitHub → Settings → Secrets → Actions"
-            echo "Ou conecte o repo no painel Railway (Source → GitHub) para auto-deploy."
-            echo "Redeploy manual: docs/DEPLOY_RAILWAY.md"
-            exit 1
+            echo "Railway auto-deploy via GitHub (Source) — pulando CLI."
+            echo "Se o bot não atualizou, veja Deployments no painel Railway."
+            exit 0
           fi
           if [ -z "${{ secrets.RAILWAY_SERVICE_ID }}" ]; then
-            echo "::error::RAILWAY_SERVICE_ID não configurado."
-            exit 1
+            echo "::warning::RAILWAY_SERVICE_ID ausente — pulando CLI."
+            exit 0
           fi
+          npm install -g @railway/cli
           railway up --detach --service "${{ secrets.RAILWAY_SERVICE_ID }}"
 
-      - name: Deploy Convex functions
+      - name: Deploy Convex functions (opcional)
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
         run: |
           if [ -z "$CONVEX_DEPLOY_KEY" ]; then
-            echo "CONVEX_DEPLOY_KEY não configurado — pulando deploy Convex."
+            echo "CONVEX_DEPLOY_KEY não configurado — Convex já pode estar deployado manualmente."
             exit 0
           fi
           npm ci

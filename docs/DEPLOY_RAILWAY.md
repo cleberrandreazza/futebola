@@ -1,52 +1,62 @@
 # Deploy no Railway
 
-## Por que o push no GitHub nem sempre redeploya
+## Modo atual (Opção B — recomendado)
 
-O workflow `.github/workflows/railway-deploy.yml` só funciona se estes **secrets** existirem em  
-**GitHub → repositório → Settings → Secrets and variables → Actions**:
+No Railway → **Settings → Source**:
+
+- Repositório: `cleberrandreazza/futebola`
+- Branch: `main`
+- **Auto deploys when pushed to GitHub**: ligado
+
+Cada `git push` em `main` dispara build **direto no Railway**.  
+**Não precisa** de `RAILWAY_TOKEN` no GitHub Actions.
+
+**Wait for CI**: pode ficar **desligado** (como está). O deploy não depende do workflow Actions.
+
+---
+
+## Se o bot não atualizou após o push
+
+1. Railway → serviço do bot → aba **Deployments**
+2. Veja se há deploy **novo** após seu push (commit `b59885b` ou `49df1e0`)
+3. Status:
+   - **Success** — bot rodando; confira logs se comportamento antigo (cache Discord, etc.)
+   - **Failed** — abra o log do build (Playwright/chromium costuma demorar ou falhar)
+   - **Nenhum deploy novo** — webhook GitHub: Settings → Source → **Disconnect** e reconecte o repo
+
+### Forçar deploy agora
+
+Na aba **Deployments**, botão **Deploy** (puxa o último commit de `main`).
+
+---
+
+## Opção A — GitHub Actions com CLI (alternativa)
+
+Só use se **não** quiser auto-deploy pelo Railway. Secrets em GitHub → Actions:
 
 | Secret | Onde obter |
 |--------|------------|
-| `RAILWAY_TOKEN` | [Railway](https://railway.app) → Account Settings → **Tokens** → Create token |
-| `RAILWAY_SERVICE_ID` | Projeto → serviço do bot → Settings → copiar **Service ID** |
-| `CONVEX_DEPLOY_KEY` | (opcional) Convex Dashboard → Settings → Deploy Key |
-
-Sem `RAILWAY_TOKEN`, o deploy **não roda** (o workflow falha com mensagem explícita).
-
-Alternativa: conectar o repositório direto no Railway (**Settings → Source → GitHub**). Nesse caso cada push em `main` gera build automático, sem GitHub Actions.
-
----
-
-## Redeploy manual (agora)
-
-1. Abra [railway.app](https://railway.app) → projeto **Futebola**
-2. Clique no **serviço do bot**
-3. Aba **Deployments**
-4. No deploy de `main` mais recente, menu **⋯** → **Redeploy**  
-   — ou botão **Deploy** se o GitHub estiver conectado (puxa o último commit)
-
-Confirme que o commit em produção é `b59885b` ou mais recente (fix duplicata de apostas).
-
----
-
-## Deploy pela CLI (local)
-
-```bash
-npm install -g @railway/cli
-railway login
-cd /caminho/football
-railway link          # escolha projeto + serviço
-railway up --detach   # envia o código atual
-```
+| `RAILWAY_TOKEN` | Railway → Account → Tokens |
+| `RAILWAY_SERVICE_ID` | Serviço → Settings → Service ID |
 
 ---
 
 ## Convex
 
-Funções Convex são deployadas separadamente:
+Backend Convex é separado do Railway:
 
 ```bash
 npx convex deploy
 ```
 
-(O GitHub Actions também roda isso se `CONVEX_DEPLOY_KEY` estiver configurado.)
+Opcional: secret `CONVEX_DEPLOY_KEY` no GitHub para deploy automático no push.
+
+---
+
+## Commits recentes relevantes
+
+| Commit | Conteúdo |
+|--------|----------|
+| `b59885b` | Fix apostas duplicadas (`matchKey`) |
+| `0d59335` | Ranking no resumo do dia |
+| `a5fbafb` | Termos/privacidade via Railway URL |
