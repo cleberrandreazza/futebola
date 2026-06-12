@@ -4004,8 +4004,7 @@ async def _startup_pos_ready():
     """Sync de slash commands e menu — em background para não bloquear interações."""
     try:
         print("[Startup] Sincronizando slash commands...", flush=True)
-        # Remove comandos antigos /proximos (flat + subcomandos) — substituído por /proximo
-        bot.tree.remove_command("proximos")
+        bot.tree.remove_command("proximo")  # nome antigo substituído por /proximos
         guild_obj: discord.Object | None = None
         guild_id = DISCORD_GUILD_ID
         if not guild_id and CANAL_EVENTO_ID:
@@ -4017,17 +4016,17 @@ async def _startup_pos_ready():
                 print(f"[Startup] Não foi possível resolver guild pelo canal: {e}", flush=True)
         if guild_id:
             guild_obj = discord.Object(id=guild_id)
-            bot.tree.copy_global_to(guild=guild_obj)
-            bot.tree.remove_command("proximos", guild=guild_obj)
-            print(f"[Startup] Sync guild {guild_id}...", flush=True)
         try:
+            # Sync global — sobrescreve /proximos antigo (time obrigatório) e remove /proximo
+            synced = await asyncio.wait_for(bot.tree.sync(), timeout=120.0)
+            print(f"[Startup] Slash global sincronizado: {len(synced)} comandos", flush=True)
             if guild_obj:
-                synced = await asyncio.wait_for(bot.tree.sync(guild=guild_obj), timeout=90.0)
-            else:
-                synced = await asyncio.wait_for(bot.tree.sync(), timeout=90.0)
-            print(f"[Startup] Slash commands sincronizados: {len(synced)}", flush=True)
+                bot.tree.clear_commands(guild=guild_obj)
+                bot.tree.copy_global_to(guild=guild_obj)
+                synced_g = await asyncio.wait_for(bot.tree.sync(guild=guild_obj), timeout=90.0)
+                print(f"[Startup] Slash guild {guild_id} sincronizado: {len(synced_g)} comandos", flush=True)
         except asyncio.TimeoutError:
-            print("[Startup] tree.sync() timeout (90s)", flush=True)
+            print("[Startup] tree.sync() timeout", flush=True)
         except Exception as e:
             print(f"[Startup] Erro ao sincronizar slash commands: {e}", flush=True)
         if BZZOIRO_TOKEN:
@@ -7482,7 +7481,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!proximos 10 30 Flamengo` — Quantidade + horizonte em dias\n"
             "`!proximos brasil` — Seleção Brasileira\n"
             "`!proximos [N] [dias] [liga] [time]`\n"
-            "`/proximo` — Próximos jogos (informe **liga** ou **time**)\n"
+            "`/proximos` — Próximos jogos (informe **liga** ou **time**)\n"
             "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
             "`!historico [time]` `/historico` — Partidas encerradas (últimos 90 dias)"
         ),
@@ -8693,15 +8692,15 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
-@bot.tree.command(name="proximo", description="Próximos jogos — informe liga ou time")
+@bot.tree.command(name="proximos", description="Próximos jogos — informe liga ou time")
 @discord.app_commands.describe(
-    liga="Competição (opcional — use liga ou time)",
-    time="Time (opcional — use liga ou time)",
+    liga="Competição (opcional — preencha liga ou time)",
+    time="Time (opcional — preencha liga ou time)",
     quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
     dias="Horizonte em dias (padrão: 90, máx.: 365)",
 )
 @discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
-async def slash_proximo(
+async def slash_proximos(
     interaction: discord.Interaction,
     liga: str | None = None,
     time: str | None = None,
@@ -8713,7 +8712,7 @@ async def slash_proximo(
     if not liga_key and not nome_time:
         await interaction.response.send_message(
             "Informe **liga** ou **time**.\n"
-            "Ex: `/proximo liga:brasileirao` ou `/proximo time:Flamengo`",
+            "Ex: `/proximos liga:brasileirao` ou `/proximos time:Flamengo`",
             ephemeral=True,
         )
         return
