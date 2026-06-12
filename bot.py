@@ -6010,11 +6010,7 @@ async def _responder_jogos_hoje(
         jogos_por_liga = await _buscar_jogos_resumo_paralelo()
 
         if not jogos_por_liga:
-            ranking = await loop.run_in_executor(None, _apostas_ranking, "saldo", 5)
             texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
-            ranking_txt = _format_ranking_resumo(ranking)
-            if ranking_txt:
-                texto = f"{texto}\n\n{ranking_txt}"
             if interaction:
                 await interaction.followup.send(texto)
             elif msg:
@@ -6022,8 +6018,7 @@ async def _responder_jogos_hoje(
             return
 
         total = sum(len(v) for v in jogos_por_liga.values())
-        ranking = await loop.run_in_executor(None, _apostas_ranking, "saldo", 5)
-        img   = await gerar_resumo_diario_png(jogos_por_liga, ranking=ranking)
+        img   = await gerar_resumo_diario_png(jogos_por_liga)
         bz_events = await loop.run_in_executor(None, buscar_eventos_hoje_bzzoiro)
         view = None
         if bz_events:
@@ -6032,9 +6027,6 @@ async def _responder_jogos_hoje(
                 view = PartidaSelectView(opcoes, permitir_evento=True)
 
         content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
-        ranking_txt = _format_ranking_resumo(ranking)
-        if ranking_txt:
-            content = f"{content}\n\n{ranking_txt}"
         arquivo = discord.File(img)
         send_kw = {"content": content, "file": arquivo}
         if view is not None:
