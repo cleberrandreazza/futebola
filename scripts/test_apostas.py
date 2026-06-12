@@ -117,7 +117,7 @@ def test_convex_api() -> None:
 
         ranking = step(
             "getRanking",
-            lambda: c.query("apostas:getRanking", _args({"criterio": "saldo", "limit": 10})),
+            lambda: c.query("apostas:getRanking", _args({"criterio": "vitorias", "limit": 10})),
         )
         assert all(
             str(r.get("userId", "")).isdigit() for r in ranking
@@ -156,7 +156,7 @@ def test_bot_helpers() -> None:
         ok = bot._apostas_settle(str(bets[0]["_id"]), "cancelada")
         assert ok, "settle cancelada"
 
-        rows = bot._apostas_ranking("saldo", 5)
+        rows = bot._apostas_ranking("vitorias", 5)
         assert isinstance(rows, list)
         assert not any(r.get("userId") == uid for r in rows), "ranking local ignora IDs não-Discord"
 
@@ -286,6 +286,24 @@ def test_duplicata_match_key() -> None:
     print("OK duplicata — matchKey bloqueia IDs diferentes na mesma partida")
 
 
+def test_ranking_sort_vitorias() -> None:
+    import bot
+
+    rows = [
+        {"userId": "1", "displayName": "A", "saldo": 950, "totalGanho": 0,
+         "apostasGanhas": 0, "apostasPerdidas": 0},
+        {"userId": "2", "displayName": "B", "saldo": 500, "totalGanho": -100,
+         "apostasGanhas": 0, "apostasPerdidas": 1},
+        {"userId": "3", "displayName": "C", "saldo": 500, "totalGanho": 0,
+         "apostasGanhas": 0, "apostasPerdidas": 0},
+        {"userId": "4", "displayName": "D", "saldo": 200, "totalGanho": 50,
+         "apostasGanhas": 2, "apostasPerdidas": 1},
+    ]
+    rows.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
+    assert [r["displayName"] for r in rows] == ["D", "A", "C", "B"]
+    print("OK ranking — vitórias, saldo e menos derrotas")
+
+
 def test_espn_liquidacao_summary() -> None:
     import bot
     from unittest.mock import patch
@@ -357,6 +375,8 @@ def main() -> int:
     test_evento_apostavel()
     print("\n=== Duplicata matchKey ===")
     test_duplicata_match_key()
+    print("\n=== Ranking vitórias ===")
+    test_ranking_sort_vitorias()
     print("\n=== Liquidação ESPN summary ===")
     test_espn_liquidacao_summary()
     print("\n=== Publicar ranking pós-partida ===")

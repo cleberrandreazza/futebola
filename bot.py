@@ -4124,7 +4124,20 @@ def _apostas_settle(aposta_id: str, resultado: str) -> bool:
     return True
 
 
-def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
+def _ranking_sort_key(row: dict, criterio: str) -> tuple:
+    """Chave de ordenação: vitorias (W↓, saldo↓, L↑), saldo ou lucro."""
+    if criterio == "lucro":
+        return (-row.get("totalGanho", 0),)
+    if criterio == "saldo":
+        return (-row.get("saldo", 0),)
+    return (
+        -int(row.get("apostasGanhas", 0)),
+        -int(row.get("saldo", 0)),
+        int(row.get("apostasPerdidas", 0)),
+    )
+
+
+def _apostas_ranking(criterio: str = "vitorias", limit: int = 15) -> list[dict]:
     if _convex_client:
         rows = _convex_query("apostas:getRanking", {"criterio": criterio, "limit": limit})
         if rows is not None:
@@ -4135,10 +4148,7 @@ def _apostas_ranking(criterio: str = "saldo", limit: int = 15) -> list[dict]:
         for uid, row in data["apostadores"].items()
         if _is_discord_user_id(uid)
     ]
-    if criterio == "lucro":
-        rows.sort(key=lambda r: r.get("totalGanho", 0), reverse=True)
-    else:
-        rows.sort(key=lambda r: r.get("saldo", 0), reverse=True)
+    rows.sort(key=lambda r: _ranking_sort_key(r, criterio))
     return rows[:limit]
 
 
@@ -4504,8 +4514,12 @@ def _embed_saldo(ap: dict) -> discord.Embed:
 
 
 def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None) -> discord.Embed:
-    titulo = "🏆 Ranking — Saldo" if criterio == "saldo" else "🏆 Ranking — Lucro"
-    embed = discord.Embed(title=titulo, color=0xEAB308)
+    titulos = {
+        "vitorias": "🏆 Ranking — Vitórias",
+        "saldo": "🏆 Ranking — Saldo",
+        "lucro": "🏆 Ranking — Lucro",
+    }
+    embed = discord.Embed(title=titulos.get(criterio, titulos["vitorias"]), color=0xEAB308)
     if not rows:
         embed.description = "Ninguém apostou ainda."
         return embed
@@ -4519,13 +4533,8 @@ def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None
             pos_viewer = pos
         m = medalhas[i] if i < 3 else f"**{pos}.**"
         nome = row.get("displayName", "?")[:24]
-        saldo = row.get("saldo", 0)
-        lucro = row.get("totalGanho", 0)
-        wl = f"{row.get('apostasGanhas', 0)}W-{row.get('apostasPerdidas', 0)}L"
-        if criterio == "lucro":
-            linhas.append(f"{m} {nome} — **{lucro:+,}** lucro · {saldo:,} créd · {wl}".replace(",", "."))
-        else:
-            linhas.append(f"{m} {nome} — **{saldo:,}** créd · {lucro:+,} lucro · {wl}".replace(",", "."))
+        wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
+        linhas.append(f"{m} {nome} — **{wl}**")
 
     embed.description = "\n".join(linhas)
     if pos_viewer:
@@ -4562,8 +4571,8 @@ async def _publicar_ranking_pos_partida(home: str, away: str, resultado: str) ->
         return
 
     loop = asyncio.get_event_loop()
-    rows = await loop.run_in_executor(None, _apostas_ranking, "saldo", 15)
-    embed = _embed_ranking(rows, "saldo")
+    rows = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 15)
+    embed = _embed_ranking(rows, "vitorias")
     if resultado == "cancel":
         intro = f"⚠️ **{home} × {away}** — partida cancelada · apostas estornadas"
     else:
@@ -4582,7 +4591,7 @@ async def _publicar_ranking_pos_partida(home: str, away: str, resultado: str) ->
 def _format_ranking_resumo(rows: list[dict] | None = None, limit: int = 5) -> str:
     """Texto compacto do ranking para anexar ao resumo do dia."""
     if rows is None:
-        rows = _apostas_ranking("saldo", limit)
+        rows = _apostas_ranking("vitorias", limit)
     if not rows:
         return ""
     medalhas = ("🥇", "🥈", "🥉")
@@ -4590,12 +4599,8 @@ def _format_ranking_resumo(rows: list[dict] | None = None, limit: int = 5) -> st
     for i, row in enumerate(rows[:limit]):
         m = medalhas[i] if i < 3 else f"**{i + 1}.**"
         nome = row.get("displayName", "?")[:22]
-        saldo = row.get("saldo", 0)
-        lucro = row.get("totalGanho", 0)
-        wl = f"{row.get('apostasGanhas', 0)}W-{row.get('apostasPerdidas', 0)}L"
-        linhas.append(
-            f"{m} {nome} — **{saldo:,}** créd · {lucro:+,} · {wl}".replace(",", ".")
-        )
+        wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
+        linhas.append(f"{m} {nome} — **{wl}**")
     linhas.append(f"_Apostas fictícias · /rank-apostas · odd {APOSTA_ODD:.1f}x_")
     return "\n".join(linhas)
 
@@ -4608,16 +4613,14 @@ def _html_ranking_resumo(rows: list[dict], limit: int = 5) -> str:
     for i, row in enumerate(rows[:limit]):
         m = medalhas[i] if i < 3 else f"{i + 1}."
         nome = row.get("displayName", "?")[:22]
-        saldo = row.get("saldo", 0)
-        wl = f"{row.get('apostasGanhas', 0)}W-{row.get('apostasPerdidas', 0)}L"
+        wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
         itens += (
             f'<div class="rank-item">'
             f'<span class="rank-pos">{m}</span>'
             f'<span class="rank-nome">{nome}</span>'
-            f'<span class="rank-saldo">{saldo:,} créd</span>'
             f'<span class="rank-wl">{wl}</span>'
             f"</div>"
-        ).replace(",", ".")
+        )
     return (
         f'<div class="secao rank-secao">'
         f'  <div class="liga-titulo">🏆 Ranking apostadores</div>'
@@ -4945,7 +4948,7 @@ async def resumo_diario():
 
     if not jogos_por_liga:
         loop = asyncio.get_event_loop()
-        ranking = await loop.run_in_executor(None, _apostas_ranking, "saldo", 5)
+        ranking = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 5)
         texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
         ranking_txt = _format_ranking_resumo(ranking)
         if ranking_txt:
@@ -4954,7 +4957,7 @@ async def resumo_diario():
         return
 
     loop = asyncio.get_event_loop()
-    ranking = await loop.run_in_executor(None, _apostas_ranking, "saldo", 5)
+    ranking = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 5)
     total = sum(len(v) for v in jogos_por_liga.values())
     img = await gerar_resumo_diario_png(jogos_por_liga, ranking=ranking)
     content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
@@ -7132,7 +7135,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`/saldo` — Seu saldo e estatísticas\n"
             "`/apostar` — Apostar nos jogos de **hoje** que ainda não iniciaram (mesmas ligas do `/hoje`)\n"
             "`/minhas-apostas` — Apostas abertas e recentes\n"
-            "`/rank-apostas` — Ranking por saldo ou lucro\n"
+            "`/rank-apostas` — Ranking por vitórias, saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
         ),
         inline=False,
@@ -8520,12 +8523,13 @@ async def slash_minhas_apostas(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="rank-apostas", description="Ranking dos apostadores fictícios")
-@discord.app_commands.describe(criterio="Ordenar por saldo ou lucro")
+@discord.app_commands.describe(criterio="Ordenar por vitórias, saldo ou lucro")
 @discord.app_commands.choices(criterio=[
+    discord.app_commands.Choice(name="Vitórias", value="vitorias"),
     discord.app_commands.Choice(name="Saldo", value="saldo"),
     discord.app_commands.Choice(name="Lucro", value="lucro"),
 ])
-async def slash_rank_apostas(interaction: discord.Interaction, criterio: str = "saldo"):
+async def slash_rank_apostas(interaction: discord.Interaction, criterio: str = "vitorias"):
     await interaction.response.defer()
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, _apostas_ranking, criterio, 15)

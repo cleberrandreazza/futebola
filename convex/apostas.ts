@@ -370,7 +370,11 @@ export const settle = mutation({
 export const getRanking = query({
   args: {
     secret: v.optional(v.string()),
-    criterio: v.union(v.literal("saldo"), v.literal("lucro")),
+    criterio: v.union(
+      v.literal("vitorias"),
+      v.literal("saldo"),
+      v.literal("lucro")
+    ),
     limit: v.optional(v.number()),
   },
   returns: v.array(
@@ -389,11 +393,21 @@ export const getRanking = query({
     const docs = (await ctx.db.query("apostadores").collect()).filter((d) =>
       isDiscordUserId(d.userId)
     );
-    docs.sort((a, b) =>
-      args.criterio === "saldo"
-        ? b.saldo - a.saldo
-        : b.totalGanho - a.totalGanho
-    );
+    docs.sort((a, b) => {
+      if (args.criterio === "lucro") {
+        return b.totalGanho - a.totalGanho;
+      }
+      if (args.criterio === "saldo") {
+        return b.saldo - a.saldo;
+      }
+      if (b.apostasGanhas !== a.apostasGanhas) {
+        return b.apostasGanhas - a.apostasGanhas;
+      }
+      if (b.saldo !== a.saldo) {
+        return b.saldo - a.saldo;
+      }
+      return a.apostasPerdidas - b.apostasPerdidas;
+    });
     return docs.slice(0, lim).map((d) => ({
       userId: d.userId,
       displayName: d.displayName,
