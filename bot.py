@@ -4004,6 +4004,8 @@ async def _startup_pos_ready():
     """Sync de slash commands e menu — em background para não bloquear interações."""
     try:
         print("[Startup] Sincronizando slash commands...", flush=True)
+        # Remove comandos antigos /proximos (flat + subcomandos) — substituído por /proximo
+        bot.tree.remove_command("proximos")
         guild_obj: discord.Object | None = None
         guild_id = DISCORD_GUILD_ID
         if not guild_id and CANAL_EVENTO_ID:
@@ -4016,6 +4018,7 @@ async def _startup_pos_ready():
         if guild_id:
             guild_obj = discord.Object(id=guild_id)
             bot.tree.copy_global_to(guild=guild_obj)
+            bot.tree.remove_command("proximos", guild=guild_obj)
             print(f"[Startup] Sync guild {guild_id}...", flush=True)
         try:
             if guild_obj:
@@ -7479,8 +7482,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!proximos 10 30 Flamengo` — Quantidade + horizonte em dias\n"
             "`!proximos brasil` — Seleção Brasileira\n"
             "`!proximos [N] [dias] [liga] [time]`\n"
-            "`/proximos liga` — Próximos jogos só da competição\n"
-            "`/proximos time` — Próximos jogos de um time\n"
+            "`/proximo` — Próximos jogos (informe **liga** ou **time**)\n"
             "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
             "`!historico [time]` `/historico` — Partidas encerradas (últimos 90 dias)"
         ),
@@ -8691,64 +8693,37 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
-proximos_group = discord.app_commands.Group(
-    name="proximos",
-    description="Próximos jogos de um time ou de uma liga",
-)
-
-
-@proximos_group.command(name="liga", description="Próximos jogos de uma competição")
+@bot.tree.command(name="proximo", description="Próximos jogos — informe liga ou time")
 @discord.app_commands.describe(
-    liga="Competição",
-    quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
-    dias="Horizonte em dias (padrão: 90, máx.: 365)",
-)
-@discord.app_commands.autocomplete(liga=_liga_autocomplete)
-async def slash_proximos_liga(
-    interaction: discord.Interaction,
-    liga: str,
-    quantidade: int = PROXIMOS_PADRAO,
-    dias: int = PROXIMOS_DIAS_PADRAO,
-):
-    liga_key = _resolve_liga_key(liga)
-    if not liga_key:
-        await interaction.response.send_message("❌ Liga inválida.", ephemeral=True)
-        return
-    await _responder_proximos_time(
-        "",
-        interaction=interaction,
-        limite=quantidade,
-        dias=dias,
-        liga_key=liga_key,
-    )
-
-
-@proximos_group.command(name="time", description="Próximos jogos de um time")
-@discord.app_commands.describe(
-    time="Nome do time",
-    liga="Filtrar por competição (opcional)",
+    liga="Competição (opcional — use liga ou time)",
+    time="Time (opcional — use liga ou time)",
     quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
     dias="Horizonte em dias (padrão: 90, máx.: 365)",
 )
 @discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
-async def slash_proximos_time(
+async def slash_proximo(
     interaction: discord.Interaction,
-    time: str,
-    liga: str = "",
+    liga: str | None = None,
+    time: str | None = None,
     quantidade: int = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ):
     liga_key = _resolve_liga_key(liga) if liga else None
+    nome_time = (time or "").strip()
+    if not liga_key and not nome_time:
+        await interaction.response.send_message(
+            "Informe **liga** ou **time**.\n"
+            "Ex: `/proximo liga:brasileirao` ou `/proximo time:Flamengo`",
+            ephemeral=True,
+        )
+        return
     await _responder_proximos_time(
-        time.strip(),
+        nome_time,
         interaction=interaction,
         limite=quantidade,
         dias=dias,
         liga_key=liga_key,
     )
-
-
-bot.tree.add_command(proximos_group)
 
 
 @bot.tree.command(name="partida", description="Detalhes da partida mais recente de um time")
