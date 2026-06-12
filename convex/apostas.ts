@@ -403,10 +403,10 @@ export const getRanking = query({
       if (b.apostasGanhas !== a.apostasGanhas) {
         return b.apostasGanhas - a.apostasGanhas;
       }
-      if (b.saldo !== a.saldo) {
-        return b.saldo - a.saldo;
+      if (a.apostasPerdidas !== b.apostasPerdidas) {
+        return a.apostasPerdidas - b.apostasPerdidas;
       }
-      return a.apostasPerdidas - b.apostasPerdidas;
+      return b.saldo - a.saldo;
     });
     return docs.slice(0, lim).map((d) => ({
       userId: d.userId,

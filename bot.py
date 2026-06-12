@@ -4569,15 +4569,15 @@ def _apostas_settle(aposta_id: str, resultado: str) -> bool:
 
 
 def _ranking_sort_key(row: dict, criterio: str) -> tuple:
-    """Chave de ordenação: vitorias (W↓, saldo↓, L↑), saldo ou lucro."""
+    """Chave de ordenação: vitorias (W↓, L↑, saldo↓), saldo ou lucro."""
     if criterio == "lucro":
         return (-row.get("totalGanho", 0),)
     if criterio == "saldo":
         return (-row.get("saldo", 0),)
     return (
         -int(row.get("apostasGanhas", 0)),
-        -int(row.get("saldo", 0)),
         int(row.get("apostasPerdidas", 0)),
+        -int(row.get("saldo", 0)),
     )
 
 

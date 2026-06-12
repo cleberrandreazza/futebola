@@ -301,7 +301,16 @@ def test_ranking_sort_vitorias() -> None:
     ]
     rows.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
     assert [r["displayName"] for r in rows] == ["D", "A", "C", "B"]
-    print("OK ranking — vitórias, saldo e menos derrotas")
+
+    rows2 = [
+        {"displayName": "aleque", "saldo": 900, "apostasGanhas": 1, "apostasPerdidas": 0},
+        {"displayName": "달", "saldo": 1000, "apostasGanhas": 0, "apostasPerdidas": 0},
+        {"displayName": "erick", "saldo": 400, "apostasGanhas": 0, "apostasPerdidas": 1},
+        {"displayName": "zk", "saldo": 800, "apostasGanhas": 0, "apostasPerdidas": 2},
+    ]
+    rows2.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
+    assert [r["displayName"] for r in rows2] == ["aleque", "달", "erick", "zk"]
+    print("OK ranking — vitórias, menos derrotas, saldo em empate W-L")
 
 
 def test_espn_liquidacao_summary() -> None:
