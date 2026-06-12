@@ -143,15 +143,45 @@ PROXIMOS_PADRAO = 5
 PROXIMOS_MAX    = 25
 PROXIMOS_DIAS_PADRAO = 90
 PROXIMOS_DIAS_MAX    = 365
+PROXIMOS_API_MAX     = 100
 _PROXIMOS_DIAS_SEM   = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 
 
-def _normalizar_limite_proximos(limite: int) -> int:
+def _normalizar_limite_proximos(limite: int | None) -> int | None:
+    if limite is None:
+        return None
     try:
         n = int(limite)
     except (TypeError, ValueError):
         return PROXIMOS_PADRAO
     return max(1, min(n, PROXIMOS_MAX))
+
+
+def _aplicar_limite_proximos(jogos: list, limite: int | None) -> list:
+    if limite is None:
+        return jogos
+    return jogos[:limite]
+
+
+def _api_limit_proximos(limite: int | None, *, mult: int = 3, minimo: int = 30) -> int:
+    if limite is None:
+        return PROXIMOS_API_MAX
+    return min(max(limite * mult, minimo), PROXIMOS_API_MAX)
+
+
+def _slash_opts_preenchidas(interaction: discord.Interaction) -> set[str]:
+    data = interaction.data or {}
+    return {o["name"] for o in (data.get("options") or [])}
+
+
+def _limite_proximos_slash(interaction: discord.Interaction, quantidade: int) -> int | None:
+    """Sem quantidade explícita, mas com dias → todos os jogos no período."""
+    opts = _slash_opts_preenchidas(interaction)
+    if "quantidade" in opts:
+        return _normalizar_limite_proximos(quantidade)
+    if "dias" in opts:
+        return None
+    return PROXIMOS_PADRAO
 
 
 def _normalizar_dias_proximos(dias: int) -> int:
@@ -162,7 +192,7 @@ def _normalizar_dias_proximos(dias: int) -> int:
     return max(1, min(n, PROXIMOS_DIAS_MAX))
 
 
-def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, int, str | None, str]:
+def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int | None, int, str | None, str]:
     """Ex.: `10 30 flamengo` → (10 jogos, 30 dias, None, 'flamengo');
     `10 brasileirao flamengo` → (10, 90, 'brasileirao', 'flamengo');
     `brasileirao` → (5, 90, 'brasileirao', '')."""
@@ -174,25 +204,36 @@ def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, int, str | Non
     return _parse_proximos_tokens(tokens)
 
 
-def _parse_proximos_tokens(tokens: list[str]) -> tuple[int, int, str | None, str]:
-    qtd   = PROXIMOS_PADRAO
+def _parse_proximos_tokens(tokens: list[str]) -> tuple[int | None, int, str | None, str]:
+    qtd: int | None = PROXIMOS_PADRAO
     dias  = PROXIMOS_DIAS_PADRAO
     parts = list(tokens)
-    if parts and parts[0].isdigit():
-        qtd = _normalizar_limite_proximos(int(parts[0]))
+    nums: list[int] = []
+    while parts and parts[0].isdigit():
+        nums.append(int(parts[0]))
         parts = parts[1:]
-    if parts and parts[0].isdigit():
-        dias = _normalizar_dias_proximos(int(parts[0]))
-        parts = parts[1:]
+    if len(nums) >= 2:
+        qtd = _normalizar_limite_proximos(nums[0])
+        dias = _normalizar_dias_proximos(nums[1])
+    elif len(nums) == 1:
+        qtd = nums[0]  # resolve abaixo: qtd ou dias conforme liga/time
     if not parts:
+        if len(nums) == 1:
+            return _normalizar_limite_proximos(nums[0]), dias, None, ""
         return qtd, dias, None, ""
 
-    # Liga com nome composto: "copa do brasil", "premier league", etc.
     for n in range(min(len(parts), 4), 0, -1):
         liga_key = _resolve_liga_key(" ".join(parts[:n]))
         if liga_key:
-            return qtd, dias, liga_key, " ".join(parts[n:]).strip()
+            resto = " ".join(parts[n:]).strip()
+            if len(nums) == 1:
+                if resto:
+                    return _normalizar_limite_proximos(nums[0]), dias, liga_key, resto
+                return None, _normalizar_dias_proximos(nums[0]), liga_key, ""
+            return qtd, dias, liga_key, resto
 
+    if len(nums) == 1:
+        return _normalizar_limite_proximos(nums[0]), dias, None, " ".join(parts).strip()
     return qtd, dias, None, " ".join(parts).strip()
 
 
@@ -247,7 +288,7 @@ def _titulo_liga_proximos(liga_key: str) -> str:
 
 def _buscar_proximos_liga(
     liga_key: str,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> tuple[list, str, str] | None:
     """Próximos jogos de uma liga inteira (sem filtrar por time)."""
@@ -259,7 +300,7 @@ def _buscar_proximos_liga(
     if liga_key in _BZ_LIGA_TO_ID:
         jogos = buscar_proximos_liga_bzzoiro(liga_key, limite, dias)
         if jogos:
-            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            jogos = _aplicar_limite_proximos(_filtrar_proximos_por_dias(jogos, dias), limite)
             if jogos:
                 return jogos, titulo, nome_liga_hdr
 
@@ -267,7 +308,7 @@ def _buscar_proximos_liga(
     if slug:
         jogos = buscar_proximos_liga_espn(slug, liga_key, limite, dias)
         if jogos:
-            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            jogos = _aplicar_limite_proximos(_filtrar_proximos_por_dias(jogos, dias), limite)
             if jogos:
                 return jogos, titulo, nome_liga_hdr
 
@@ -277,7 +318,7 @@ def _buscar_proximos_liga(
 def _buscar_proximos_time(
     nome_time: str,
     liga_key: str | None = None,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> tuple[list, str, str] | None:
     """Próximos jogos de um time — mesma lógica do !proximos / /proximos."""
@@ -285,13 +326,16 @@ def _buscar_proximos_time(
     dias = _normalizar_dias_proximos(dias)
     nome_liga_hdr = _nome_liga_display(liga_key) if liga_key else ""
 
+    def _final(jogos: list) -> list:
+        return _aplicar_limite_proximos(_filtrar_proximos_por_dias(jogos, dias), limite)
+
     eh_selecao = bool(_canonical_selecao(nome_time)) or (liga_key in _LIGAS_SELECAO)
     if eh_selecao:
-        selecao_result = buscar_proximos_selecao(nome_time, liga_key, limite=limite)
+        selecao_result = buscar_proximos_selecao(nome_time, liga_key, limite=limite, dias=dias)
         if not selecao_result:
             return None
         jogos, nome_oficial = selecao_result
-        jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+        jogos = _final(jogos)
         if not jogos:
             return None
         nl = nome_liga_hdr if liga_key and liga_key in _LIGAS_SELECAO else (nome_liga_hdr or "🌍 Seleções")
@@ -303,16 +347,16 @@ def _buscar_proximos_time(
     )
     if bz_result:
         jogos, nome_oficial = bz_result
-        jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+        jogos = _final(jogos)
         if not jogos:
             return None
         return jogos, nome_oficial, nome_liga_hdr
 
     if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
-        selecao_result = buscar_proximos_selecao(nome_time, None, limite=limite)
+        selecao_result = buscar_proximos_selecao(nome_time, None, limite=limite, dias=dias)
         if selecao_result:
             jogos, nome_oficial = selecao_result
-            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            jogos = _final(jogos)
             if jogos:
                 return jogos, nome_oficial, "🌍 Seleções"
         return None
@@ -322,8 +366,8 @@ def _buscar_proximos_time(
     if not resultado:
         return None
     team_id, nome_oficial = resultado
-    jogos = buscar_proximos_espn_clube(slug, team_id, limite=limite)
-    jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+    jogos = buscar_proximos_espn_clube(slug, team_id, limite=limite, dias=dias)
+    jogos = _final(jogos)
     if not jogos:
         return None
     return jogos, nome_oficial, nome_liga_hdr or _nome_liga_display(liga_key)
@@ -947,7 +991,7 @@ def _bz_build_team_map() -> dict[str, tuple[int, str]]:
 def buscar_proximos_bzzoiro(
     nome_time: str,
     league_id_filter: int | None = None,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> tuple[list, str] | None:
     """Retorna (fixtures, nome_oficial) dos próximos jogos de um time via Bzzoiro.
@@ -974,8 +1018,7 @@ def buscar_proximos_bzzoiro(
     team_id, display_name = result
     hoje = datetime.now(tz=BRT).date()
     fim = hoje + timedelta(days=dias)
-    # Pede mais para compensar possíveis filtros por liga
-    api_limit = min(max(limite * 3, 10), 50)
+    api_limit = _api_limit_proximos(limite, mult=3, minimo=10)
     data  = _bzzoiro_get(
         f"teams/{team_id}/fixtures/",
         {"date_from": str(hoje), "date_to": str(fim), "limit": api_limit},
@@ -997,14 +1040,14 @@ def buscar_proximos_bzzoiro(
         except Exception:
             pass
         fixtures.append(f)
-        if len(fixtures) >= limite:
+        if limite is not None and len(fixtures) >= limite:
             break
     return (fixtures, display_name) if fixtures else None
 
 
 def buscar_proximos_liga_bzzoiro(
     liga_key: str,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> list | None:
     """Próximos jogos futuros de uma liga via Bzzoiro (events/ por league_id)."""
@@ -1020,7 +1063,7 @@ def buscar_proximos_liga_bzzoiro(
         "league_id": league_id,
         "date_from": str(hoje),
         "date_to": str(fim),
-        "limit": min(max(limite * 3, 30), 100),
+        "limit": _api_limit_proximos(limite),
     }
     if liga_key == "copadobrasil":
         params["season_id"] = _BZ_COPA_SEASON
@@ -1049,7 +1092,7 @@ def buscar_proximos_liga_bzzoiro(
         except Exception:
             pass
         fixtures.append(f)
-        if len(fixtures) >= limite:
+        if limite is not None and len(fixtures) >= limite:
             break
     return fixtures if fixtures else None
 
@@ -1732,7 +1775,7 @@ def buscar_time_id(slug: str, nome_time: str) -> tuple | None:
     return melhor
 
 
-def buscar_proximos_jogos(slug: str, team_id: str, limite: int = PROXIMOS_PADRAO) -> list:
+def buscar_proximos_jogos(slug: str, team_id: str, limite: int | None = PROXIMOS_PADRAO) -> list:
     """Retorna próximos fixtures de um time."""
     limite = _normalizar_limite_proximos(limite)
     data = _espn_get(f"{ESPN_V1}/{slug}/teams/{team_id}/schedule")
@@ -1767,7 +1810,7 @@ def buscar_proximos_jogos(slug: str, team_id: str, limite: int = PROXIMOS_PADRAO
                 "meta": _extrair_meta(comp),
                 "_slug": slug,
             })
-            if len(proximos) >= limite:
+            if limite is not None and len(proximos) >= limite:
                 break
         return proximos
     except Exception as e:
@@ -1775,17 +1818,27 @@ def buscar_proximos_jogos(slug: str, team_id: str, limite: int = PROXIMOS_PADRAO
         return []
 
 
-def buscar_proximos_espn_clube(slug: str, team_id: str, limite: int = PROXIMOS_PADRAO) -> list:
-    """Schedule + scoreboard ESPN até `limite` jogos futuros."""
+def buscar_proximos_espn_clube(
+    slug: str,
+    team_id: str,
+    limite: int | None = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> list:
+    """Schedule + scoreboard ESPN até `limite` jogos futuros (ou todos no período)."""
     limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
     jogos  = buscar_proximos_jogos(slug, team_id, limite)
-    if len(jogos) < limite:
+    falta = None if limite is None else limite - len(jogos)
+    if falta is None or falta > 0:
         vistos = {j["fixture"]["id"] for j in jogos}
-        for j in buscar_proximos_jogos_scoreboard(slug, team_id, limite - len(jogos)):
+        extra_lim = falta if falta is not None else None
+        for j in buscar_proximos_jogos_scoreboard(slug, team_id, extra_lim, dias=dias):
             if j["fixture"]["id"] not in vistos:
                 jogos.append(j)
                 vistos.add(j["fixture"]["id"])
-    return jogos[:limite]
+                if falta is not None and len(jogos) >= limite:
+                    break
+    return _aplicar_limite_proximos(jogos, limite)
 
 
 def _espn_ev_to_fixture_proximo(ev: dict, slug: str = "") -> dict:
@@ -1816,22 +1869,34 @@ def _espn_ev_to_fixture_proximo(ev: dict, slug: str = "") -> dict:
     }
 
 
-def buscar_proximos_jogos_scoreboard(slug: str, team_id: str, limite: int = 5) -> list:
+def buscar_proximos_jogos_scoreboard(
+    slug: str,
+    team_id: str,
+    limite: int | None = 5,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> list:
     """Próximos jogos via scoreboard (schedule da ESPN costuma incompleto para seleções).
 
     A ESPN retorna vazio quando o intervalo `dates` passa de ~1 ano, então
     consultamos em janelas de 120 dias até juntar jogos suficientes.
     """
+    limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
     tid     = str(team_id)
     hoje    = datetime.now(tz=BRT).date()
     hoje_dt = datetime.now(tz=BRT)
+    fim     = hoje + timedelta(days=dias)
     vistos: set[str] = set()
     candidatos: list[tuple[datetime, dict]] = []
 
-    for offset in range(0, 360, 120):
-        ini = (hoje + timedelta(days=offset)).strftime("%Y%m%d")
-        fim = (hoje + timedelta(days=offset + 120)).strftime("%Y%m%d")
-        data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": f"{ini}-{fim}", "limit": 300})
+    for offset in range(0, dias + 1, 120):
+        ini_dt = hoje + timedelta(days=offset)
+        if ini_dt > fim:
+            break
+        fim_dt = min(hoje + timedelta(days=offset + 119), fim)
+        ini = ini_dt.strftime("%Y%m%d")
+        fim_str = fim_dt.strftime("%Y%m%d")
+        data = _espn_get(f"{ESPN_V1}/{slug}/scoreboard", {"dates": f"{ini}-{fim_str}", "limit": 300})
         if not data:
             continue
         for ev in data.get("events", []):
@@ -1846,21 +1911,21 @@ def buscar_proximos_jogos_scoreboard(slug: str, team_id: str, limite: int = 5) -
                 dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).astimezone(BRT)
             except Exception:
                 continue
-            if dt < hoje_dt:
+            if dt < hoje_dt or dt.date() > fim:
                 continue
             vistos.add(eid)
             candidatos.append((dt, _espn_ev_to_fixture_proximo(ev, slug)))
-        if len(candidatos) >= limite:
+        if limite is not None and len(candidatos) >= limite:
             break
 
     candidatos.sort(key=lambda x: x[0])
-    return [f for _, f in candidatos[:limite]]
+    return _aplicar_limite_proximos([f for _, f in candidatos], limite)
 
 
 def buscar_proximos_liga_espn(
     slug: str,
     liga_key: str,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> list:
     """Próximos jogos de uma liga via scoreboard ESPN (sem filtro de time)."""
@@ -1909,11 +1974,11 @@ def buscar_proximos_liga_espn(
                 meta.setdefault("liga", liga_nome)
                 fx["meta"] = meta
             candidatos.append((dt, fx))
-        if len(candidatos) >= limite:
+        if limite is not None and len(candidatos) >= limite:
             break
 
     candidatos.sort(key=lambda x: x[0])
-    return [f for _, f in candidatos[:limite]]
+    return _aplicar_limite_proximos([f for _, f in candidatos], limite)
 
 
 def buscar_time_id_selecao(nome_time: str) -> tuple[str, str, str] | None:
@@ -1932,10 +1997,12 @@ def buscar_time_id_selecao(nome_time: str) -> tuple[str, str, str] | None:
 def buscar_proximos_selecao(
     nome_time: str,
     liga_key: str | None = None,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> tuple[list, str] | None:
     """Próximos jogos de seleção nacional via ESPN (amistosos + Copa do Mundo)."""
     limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
     if liga_key and liga_key in _LIGAS_SELECAO:
         slug = LIGAS.get(liga_key)
         if not slug:
@@ -1966,16 +2033,17 @@ def buscar_proximos_selecao(
             if eid not in vistos:
                 vistos.add(eid)
                 merged.append((j["fixture"]["date"], j))
-        falta = limite - len(merged)
-        if falta > 0:
-            for j in buscar_proximos_jogos_scoreboard(slug, team_id, limite=falta):
+        falta = None if limite is None else limite - len(merged)
+        if falta is None or falta > 0:
+            extra_lim = falta if falta is not None else None
+            for j in buscar_proximos_jogos_scoreboard(slug, team_id, limite=extra_lim, dias=dias):
                 eid = j["fixture"]["id"]
                 if eid not in vistos:
                     vistos.add(eid)
                     merged.append((j["fixture"]["date"], j))
 
     merged.sort(key=lambda x: x[0])
-    fixtures = [j for _, j in merged[:limite]]
+    fixtures = _aplicar_limite_proximos([j for _, j in merged], limite)
     return (fixtures, display) if fixtures else None
 
 
@@ -6558,7 +6626,7 @@ async def _responder_proximos_time(
     *,
     interaction: discord.Interaction | None = None,
     ctx=None,
-    limite: int = PROXIMOS_PADRAO,
+    limite: int | None = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
     liga_key: str | None = None,
 ):
@@ -6566,6 +6634,7 @@ async def _responder_proximos_time(
     dias = _normalizar_dias_proximos(dias)
     nome_time = (nome_time or "").strip()
     apenas_liga = bool(liga_key and not nome_time)
+    qtd_txt = "todos os jogos" if limite is None else f"**{limite}** jogos"
     msg = None
     liga_txt = f" ({_nome_liga_display(liga_key)})" if liga_key and nome_time else ""
     if interaction:
@@ -6575,12 +6644,11 @@ async def _responder_proximos_time(
         if apenas_liga:
             busca = _nome_liga_display(liga_key)
             msg = await ctx.send(
-                f"🔍 Buscando os próximos **{limite}** jogos do **{busca}** "
-                f"(até **{dias}** dias)..."
+                f"🔍 Buscando {qtd_txt} do **{busca}** (até **{dias}** dias)..."
             )
         else:
             msg = await ctx.send(
-                f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**{liga_txt} "
+                f"🔍 Buscando {qtd_txt} de **{nome_time}**{liga_txt} "
                 f"(até **{dias}** dias)..."
             )
 
@@ -7377,7 +7445,8 @@ async def cmd_proximos(ctx, *, texto: str = ""):
             f"Uso: `!proximos [N] [dias] [liga] [time]`\n"
             f"Ex: `!proximos Flamengo` (5 jogos · 90 dias)\n"
             f"· `!proximos brasileirao` — só jogos da liga\n"
-            f"· `!proximos 10 Flamengo` · `!proximos 10 30 Flamengo`\n"
+            f"· `!proximos 30 copadomundo` — todos os jogos em 30 dias\n"
+            f"· `!proximos 10 30 Flamengo` — 10 jogos em 30 dias\n"
             f"· `!proximos brasileirao Flamengo` · `!proximos 8 60 amistosos brasil`\n"
             f"Ligas: {ligas_disp}"
         )
@@ -8696,8 +8765,8 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
 @discord.app_commands.describe(
     liga="Competição (opcional — preencha liga ou time)",
     time="Time (opcional — preencha liga ou time)",
-    quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
-    dias="Horizonte em dias (padrão: 90, máx.: 365)",
+    quantidade="Quantos jogos (padrão: 5). Omita se informar só dias — traz todos no período",
+    dias="Horizonte em dias — se informado sem quantidade, lista todos os jogos",
 )
 @discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
 async def slash_proximos(
@@ -8719,7 +8788,7 @@ async def slash_proximos(
     await _responder_proximos_time(
         nome_time,
         interaction=interaction,
-        limite=quantidade,
+        limite=_limite_proximos_slash(interaction, quantidade),
         dias=dias,
         liga_key=liga_key,
     )
