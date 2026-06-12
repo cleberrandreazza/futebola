@@ -141,6 +141,9 @@ LIGAS_APOSTAS = list(LIGAS_RESUMO)
 
 PROXIMOS_PADRAO = 5
 PROXIMOS_MAX    = 25
+PROXIMOS_DIAS_PADRAO = 90
+PROXIMOS_DIAS_MAX    = 365
+_PROXIMOS_DIAS_SEM   = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 
 
 def _normalizar_limite_proximos(limite: int) -> int:
@@ -151,22 +154,169 @@ def _normalizar_limite_proximos(limite: int) -> int:
     return max(1, min(n, PROXIMOS_MAX))
 
 
-def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, str | None, str]:
-    """Ex.: `10 flamengo` → (10, None, 'flamengo'); use `10 brasileirao flamengo` com número primeiro."""
+def _normalizar_dias_proximos(dias: int) -> int:
+    try:
+        n = int(dias)
+    except (TypeError, ValueError):
+        return PROXIMOS_DIAS_PADRAO
+    return max(1, min(n, PROXIMOS_DIAS_MAX))
+
+
+def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, int, str | None, str]:
+    """Ex.: `10 30 flamengo` → (10 jogos, 30 dias, None, 'flamengo');
+    `10 brasileirao flamengo` → (10, 90, 'brasileirao', 'flamengo');
+    `brasileirao` → (5, 90, 'brasileirao', '')."""
     qtd   = PROXIMOS_PADRAO
+    dias  = PROXIMOS_DIAS_PADRAO
     parts: list[str] = []
     if primeiro:
         parts.append(primeiro.strip())
     if resto:
         parts.extend(resto.strip().split())
     if parts and parts[0].isdigit():
-        qtd   = _normalizar_limite_proximos(int(parts[0]))
+        qtd = _normalizar_limite_proximos(int(parts[0]))
+        parts = parts[1:]
+    if parts and parts[0].isdigit():
+        dias = _normalizar_dias_proximos(int(parts[0]))
         parts = parts[1:]
     if not parts:
-        return qtd, None, ""
+        return qtd, dias, None, ""
     if parts[0].lower() in LIGAS:
-        return qtd, parts[0].lower(), " ".join(parts[1:]).strip()
-    return qtd, None, " ".join(parts).strip()
+        return qtd, dias, parts[0].lower(), " ".join(parts[1:]).strip()
+    return qtd, dias, None, " ".join(parts).strip()
+
+
+def _filtrar_proximos_por_dias(jogos: list, dias: int) -> list:
+    limite_dt = datetime.now(tz=BRT) + timedelta(days=_normalizar_dias_proximos(dias))
+    filtrados: list = []
+    for j in jogos:
+        try:
+            dt = datetime.fromisoformat(
+                j["fixture"]["date"].replace("Z", "+00:00")
+            ).astimezone(BRT)
+            if dt <= limite_dt:
+                filtrados.append(j)
+        except Exception:
+            filtrados.append(j)
+    return filtrados
+
+
+def _proximo_liga_label(jogo: dict) -> str:
+    meta = jogo.get("meta") or {}
+    if meta.get("liga"):
+        return str(meta["liga"])
+    slug = jogo.get("_slug") or ""
+    chave = next((k for k, v in LIGAS.items() if v == slug), "")
+    if chave:
+        return LIGAS_META.get(chave, {}).get("nome", chave.title())
+    return ""
+
+
+def _format_data_proximo(date_str: str) -> str:
+    """Data/hora no card — hoje só horário; demais dias com dia da semana."""
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(BRT)
+        if dt.date() == datetime.now(tz=BRT).date():
+            return dt.strftime("%H:%M")
+        dia = _PROXIMOS_DIAS_SEM[dt.weekday()]
+        return f"{dia} {dt.strftime('%d/%m')} · {dt.strftime('%H:%M')}"
+    except Exception:
+        return "--/-- --:--"
+
+
+def _nome_liga_display(liga_key: str | None) -> str:
+    if not liga_key:
+        return ""
+    meta = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
+    return f"{meta['emoji']} {meta['nome']}"
+
+
+def _titulo_liga_proximos(liga_key: str) -> str:
+    return LIGAS_META.get(liga_key, {"nome": liga_key.title()})["nome"]
+
+
+def _buscar_proximos_liga(
+    liga_key: str,
+    limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> tuple[list, str, str] | None:
+    """Próximos jogos de uma liga inteira (sem filtrar por time)."""
+    limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
+    nome_liga_hdr = _nome_liga_display(liga_key)
+    titulo = _titulo_liga_proximos(liga_key)
+
+    if liga_key in _BZ_LIGA_TO_ID:
+        jogos = buscar_proximos_liga_bzzoiro(liga_key, limite, dias)
+        if jogos:
+            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            if jogos:
+                return jogos, titulo, nome_liga_hdr
+
+    slug = LIGAS.get(liga_key)
+    if slug:
+        jogos = buscar_proximos_liga_espn(slug, liga_key, limite, dias)
+        if jogos:
+            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            if jogos:
+                return jogos, titulo, nome_liga_hdr
+
+    return None
+
+
+def _buscar_proximos_time(
+    nome_time: str,
+    liga_key: str | None = None,
+    limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> tuple[list, str, str] | None:
+    """Próximos jogos de um time — mesma lógica do !proximos / /proximos."""
+    limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
+    nome_liga_hdr = _nome_liga_display(liga_key) if liga_key else ""
+
+    eh_selecao = bool(_canonical_selecao(nome_time)) or (liga_key in _LIGAS_SELECAO)
+    if eh_selecao:
+        selecao_result = buscar_proximos_selecao(nome_time, liga_key, limite=limite)
+        if not selecao_result:
+            return None
+        jogos, nome_oficial = selecao_result
+        jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+        if not jogos:
+            return None
+        nl = nome_liga_hdr if liga_key and liga_key in _LIGAS_SELECAO else (nome_liga_hdr or "🌍 Seleções")
+        return jogos, nome_oficial, nl
+
+    bz_league_filter = _BZ_LIGA_TO_ID.get(liga_key) if liga_key else None
+    bz_result = buscar_proximos_bzzoiro(
+        nome_time, bz_league_filter, limite=limite, dias=dias,
+    )
+    if bz_result:
+        jogos, nome_oficial = bz_result
+        jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+        if not jogos:
+            return None
+        return jogos, nome_oficial, nome_liga_hdr
+
+    if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
+        selecao_result = buscar_proximos_selecao(nome_time, None, limite=limite)
+        if selecao_result:
+            jogos, nome_oficial = selecao_result
+            jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+            if jogos:
+                return jogos, nome_oficial, "🌍 Seleções"
+        return None
+
+    slug = LIGAS[liga_key]
+    resultado = buscar_time_id(slug, nome_time)
+    if not resultado:
+        return None
+    team_id, nome_oficial = resultado
+    jogos = buscar_proximos_espn_clube(slug, team_id, limite=limite)
+    jogos = _filtrar_proximos_por_dias(jogos, dias)[:limite]
+    if not jogos:
+        return None
+    return jogos, nome_oficial, nome_liga_hdr or _nome_liga_display(liga_key)
 
 
 PASTA_LOGOS = "logos"
@@ -788,10 +938,12 @@ def buscar_proximos_bzzoiro(
     nome_time: str,
     league_id_filter: int | None = None,
     limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
 ) -> tuple[list, str] | None:
     """Retorna (fixtures, nome_oficial) dos próximos jogos de um time via Bzzoiro.
     Se league_id_filter for fornecido, retorna apenas jogos daquela liga."""
     limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
     if not BZZOIRO_TOKEN:
         return None
     team_map = _bz_build_team_map()
@@ -811,9 +963,13 @@ def buscar_proximos_bzzoiro(
         return None
     team_id, display_name = result
     hoje = datetime.now(tz=BRT).date()
+    fim = hoje + timedelta(days=dias)
     # Pede mais para compensar possíveis filtros por liga
     api_limit = min(max(limite * 3, 10), 50)
-    data  = _bzzoiro_get(f"teams/{team_id}/fixtures/", {"date_from": str(hoje), "limit": api_limit})
+    data  = _bzzoiro_get(
+        f"teams/{team_id}/fixtures/",
+        {"date_from": str(hoje), "date_to": str(fim), "limit": api_limit},
+    )
     if not data:
         return None
     logo_map = _buscar_logos_brasileiros()
@@ -834,6 +990,58 @@ def buscar_proximos_bzzoiro(
         if len(fixtures) >= limite:
             break
     return (fixtures, display_name) if fixtures else None
+
+
+def buscar_proximos_liga_bzzoiro(
+    liga_key: str,
+    limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> list | None:
+    """Próximos jogos futuros de uma liga via Bzzoiro (events/ por league_id)."""
+    limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
+    league_id = _BZ_LIGA_TO_ID.get(liga_key)
+    if not BZZOIRO_TOKEN or not league_id:
+        return None
+
+    hoje = datetime.now(tz=BRT).date()
+    fim = hoje + timedelta(days=dias)
+    params: dict = {
+        "league_id": league_id,
+        "date_from": str(hoje),
+        "date_to": str(fim),
+        "limit": min(max(limite * 3, 30), 100),
+    }
+    if liga_key == "copadobrasil":
+        params["season_id"] = _BZ_COPA_SEASON
+    else:
+        season = _bz_current_season(league_id)
+        if season:
+            params["season_id"] = season
+
+    data = _bzzoiro_get("events/", params)
+    if not data:
+        return None
+
+    logo_map = _buscar_logos_brasileiros()
+    now_brt = datetime.now(tz=BRT)
+    fixtures: list = []
+    for ev in sorted(data.get("results", []), key=lambda e: e.get("event_date", "")):
+        if ev.get("status") not in ("notstarted", "postponed"):
+            continue
+        f = _bzzoiro_ev_to_fixture(ev, logo_map)
+        try:
+            dt = datetime.fromisoformat(
+                f["fixture"]["date"].replace("Z", "+00:00")
+            ).astimezone(BRT)
+            if dt < now_brt:
+                continue
+        except Exception:
+            pass
+        fixtures.append(f)
+        if len(fixtures) >= limite:
+            break
+    return fixtures if fixtures else None
 
 
 def _bzzoiro_confrontos(events: list, logo_map: dict) -> list:
@@ -1326,7 +1534,16 @@ def _extrair_meta(comp: dict) -> dict:
     odds_raw = ((comp.get("odds") or [{}])[0]) or {}
     odds_str = odds_raw.get("details", "")
 
-    return {"broadcasts": broadcasts, "venue": venue, "odds": odds_str}
+    league = comp.get("league") or {}
+    liga = (
+        league.get("name")
+        or league.get("abbreviation")
+        or (comp.get("type") or {}).get("abbreviation")
+        or (comp.get("type") or {}).get("text")
+        or ""
+    )
+
+    return {"broadcasts": broadcasts, "venue": venue, "odds": odds_str, "liga": liga}
 
 
 # ==========================================
@@ -1590,6 +1807,65 @@ def buscar_proximos_jogos_scoreboard(slug: str, team_id: str, limite: int = 5) -
                 continue
             vistos.add(eid)
             candidatos.append((dt, _espn_ev_to_fixture_proximo(ev, slug)))
+        if len(candidatos) >= limite:
+            break
+
+    candidatos.sort(key=lambda x: x[0])
+    return [f for _, f in candidatos[:limite]]
+
+
+def buscar_proximos_liga_espn(
+    slug: str,
+    liga_key: str,
+    limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> list:
+    """Próximos jogos de uma liga via scoreboard ESPN (sem filtro de time)."""
+    limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
+    hoje = datetime.now(tz=BRT).date()
+    hoje_dt = datetime.now(tz=BRT)
+    fim = hoje + timedelta(days=dias)
+    vistos: set[str] = set()
+    candidatos: list[tuple[datetime, dict]] = []
+    liga_nome = LIGAS_META.get(liga_key, {}).get("nome", "")
+
+    for offset in range(0, dias + 1, 120):
+        ini_dt = hoje + timedelta(days=offset)
+        if ini_dt > fim:
+            break
+        fim_dt = min(hoje + timedelta(days=offset + 119), fim)
+        ini = ini_dt.strftime("%Y%m%d")
+        fim_str = fim_dt.strftime("%Y%m%d")
+        data = _espn_get(
+            f"{ESPN_V1}/{slug}/scoreboard",
+            {"dates": f"{ini}-{fim_str}", "limit": 300},
+        )
+        if not data:
+            continue
+        for ev in data.get("events", []):
+            eid = str(ev.get("id", ""))
+            if not eid or eid in vistos:
+                continue
+            status = ev.get("status") or {}
+            state = (status.get("type") or {}).get("state") or "pre"
+            if state == "post":
+                continue
+            try:
+                dt = datetime.fromisoformat(
+                    ev.get("date", "").replace("Z", "+00:00")
+                ).astimezone(BRT)
+            except Exception:
+                continue
+            if dt < hoje_dt or dt.date() > fim:
+                continue
+            vistos.add(eid)
+            fx = _espn_ev_to_fixture_proximo(ev, slug)
+            if liga_nome:
+                meta = fx.get("meta") or {}
+                meta.setdefault("liga", liga_nome)
+                fx["meta"] = meta
+            candidatos.append((dt, fx))
         if len(candidatos) >= limite:
             break
 
@@ -2834,7 +3110,12 @@ body{{background:#111827;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;
     return await _html_para_png(html, "chaveamento_temp.png", width=total_w)
 
 
-async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str:
+async def gerar_proximos_png(
+    jogos: list,
+    nome_time: str,
+    nome_liga: str = "",
+    dias: int = PROXIMOS_DIAS_PADRAO,
+) -> str:
     urls = list({
         url for j in jogos
         for url in (j["teams"]["home"].get("logo",""), j["teams"]["away"].get("logo","")) if url
@@ -2843,11 +3124,7 @@ async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str
 
     cards = ""
     for j in jogos:
-        try:
-            dt = datetime.fromisoformat(j["fixture"]["date"].replace("Z","+00:00")).astimezone(BRT)
-            data_hora = dt.strftime("%d/%m %H:%M")
-        except Exception:
-            data_hora = "--/-- --:--"
+        data_hora = _format_data_proximo(j["fixture"]["date"])
 
         nome_casa = j["teams"]["home"]["name"]
         nome_fora = j["teams"]["away"]["name"]
@@ -2855,8 +3132,10 @@ async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str
         b64_fora  = logos.get(j["teams"]["away"].get("logo",""),"")
         destaque  = nome_time.lower() in nome_casa.lower() or nome_time.lower() in nome_fora.lower()
 
-        liga_card  = (j.get("meta") or {}).get("liga", "")
-        liga_badge = (f'<span class="liga-badge">{liga_card}</span>' if liga_card and not nome_liga else "")
+        liga_card = _proximo_liga_label(j) or nome_liga
+        liga_badge = (
+            f'<span class="liga-badge">{liga_card}</span>' if liga_card else ""
+        )
         cards += (
             f'<div class="card{" destaque" if destaque else ""}">'
             f'<div class="lado home"><span class="tnome">{nome_casa}</span>'
@@ -2867,7 +3146,11 @@ async def gerar_proximos_png(jogos: list, nome_time: str, nome_liga: str) -> str
             f'</div>'
         )
 
-    sub_html = f'<div class="sub">{nome_liga}</div>' if nome_liga else ""
+    sub_parts: list[str] = []
+    if nome_liga:
+        sub_parts.append(nome_liga)
+    sub_parts.append(f"próximos {len(jogos)} jogos · {dias} dias")
+    sub_html = f'<div class="sub">{" · ".join(sub_parts)}</div>'
     css = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;width:560px;padding:20px}
@@ -6231,20 +6514,38 @@ async def _responder_proximos_time(
     interaction: discord.Interaction | None = None,
     ctx=None,
     limite: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+    liga_key: str | None = None,
 ):
     limite = _normalizar_limite_proximos(limite)
+    dias = _normalizar_dias_proximos(dias)
+    nome_time = (nome_time or "").strip()
+    apenas_liga = bool(liga_key and not nome_time)
     msg = None
+    liga_txt = f" ({_nome_liga_display(liga_key)})" if liga_key and nome_time else ""
     if interaction:
         if not interaction.response.is_done():
             await interaction.response.defer()
     elif ctx:
-        msg = await ctx.send(f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**...")
+        if apenas_liga:
+            busca = _nome_liga_display(liga_key)
+            msg = await ctx.send(
+                f"🔍 Buscando os próximos **{limite}** jogos do **{busca}** "
+                f"(até **{dias}** dias)..."
+            )
+        else:
+            msg = await ctx.send(
+                f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**{liga_txt} "
+                f"(até **{dias}** dias)..."
+            )
 
     loop = asyncio.get_event_loop()
 
     async def _enviar(jogos: list, nome_oficial: str, nome_liga: str):
         try:
-            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
+            caminho = await gerar_proximos_png(
+                jogos, nome_oficial, nome_liga, dias=dias,
+            )
         except Exception as e:
             err = f"Erro ao gerar imagem: {e}"
             if interaction:
@@ -6263,35 +6564,81 @@ async def _responder_proximos_time(
             await msg.delete()
             await ctx.send(**send_kw)
 
-    eh_selecao = bool(_canonical_selecao(nome_time))
-    if eh_selecao:
-        r = await loop.run_in_executor(
-            None, functools.partial(buscar_proximos_selecao, nome_time, None, limite=limite),
+    if apenas_liga:
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(
+                _buscar_proximos_liga, liga_key, limite=limite, dias=dias,
+            ),
         )
-        if r:
-            jogos, nome_oficial = r
-            await _enviar(jogos, nome_oficial, "🌍 Seleções")
-            return
-        txt = f"Nenhum jogo futuro para **{nome_time}**."
-        if interaction:
-            await interaction.followup.send(txt)
-        elif msg:
-            await msg.edit(content=txt)
+    else:
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(
+                _buscar_proximos_time, nome_time, liga_key, limite=limite, dias=dias,
+            ),
+        )
+    if result:
+        jogos, nome_oficial, nome_liga = result
+        await _enviar(jogos, nome_oficial, nome_liga)
         return
 
-    bz_result = await loop.run_in_executor(
-        None, functools.partial(buscar_proximos_bzzoiro, nome_time, None, limite=limite),
-    )
-    if bz_result:
-        jogos, nome_oficial = bz_result
-        await _enviar(jogos, nome_oficial, "")
-        return
-
-    txt = f"Nenhum jogo futuro encontrado para **{nome_time}**."
+    if apenas_liga:
+        txt = (
+            f"Nenhum jogo futuro encontrado em **{_nome_liga_display(liga_key)}** "
+            f"nos próximos **{dias}** dias."
+        )
+    else:
+        txt = f"Nenhum jogo futuro encontrado para **{nome_time}** nos próximos **{dias}** dias."
     if interaction:
         await interaction.followup.send(txt)
     elif msg:
         await msg.edit(content=txt)
+
+
+class ProximosLigaView(discord.ui.View):
+    """Escolhe liga (opcional) antes de buscar próximos jogos — menu / botão."""
+
+    def __init__(self, nome_time: str, limite: int = PROXIMOS_PADRAO, dias: int = PROXIMOS_DIAS_PADRAO):
+        super().__init__(timeout=120)
+        self.nome_time = nome_time
+        self.limite = limite
+        self.dias = dias
+        opts = [
+            discord.SelectOption(label="🌐 Todas as ligas", value="__all__", default=True),
+        ]
+        for k in LIGAS:
+            meta = LIGAS_META.get(k, {"nome": k.title(), "emoji": "🏆"})
+            opts.append(
+                discord.SelectOption(
+                    label=f"{meta['emoji']} {meta['nome']}"[:100],
+                    value=k,
+                )
+            )
+        sel = discord.ui.Select(
+            placeholder="🏆 Filtrar por liga (opcional)...",
+            options=opts[:25],
+            row=0,
+        )
+        sel.callback = self._on_liga
+        self.add_item(sel)
+
+    async def _on_liga(self, interaction: discord.Interaction):
+        val = interaction.data["values"][0]
+        liga_key = None if val == "__all__" else val
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"🔍 Buscando próximos jogos de **{self.nome_time}**...",
+            view=self,
+        )
+        await _responder_proximos_time(
+            self.nome_time,
+            interaction=interaction,
+            limite=self.limite,
+            dias=self.dias,
+            liga_key=liga_key,
+        )
 
 
 class SeguirEscolhaTimeView(discord.ui.View):
@@ -6333,8 +6680,12 @@ class SeguirTimeSelectView(discord.ui.View):
     async def _on_pick(self, interaction: discord.Interaction):
         time = interaction.data["values"][0]
         if self.modo == "proximos":
-            await interaction.response.defer(ephemeral=True)
-            await _responder_proximos_time(time, interaction=interaction)
+            view = ProximosLigaView(time)
+            await interaction.response.send_message(
+                f"📅 **Próximos jogos — {time}**\nEscolha a liga (ou todas):",
+                view=view,
+                ephemeral=True,
+            )
             return
         msg = await _executar_seguir(interaction.user, time)
         for item in self.children:
@@ -6931,97 +7282,27 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
     if not primeiro:
         ligas_disp = ", ".join(f"`{k}`" for k in LIGAS)
         await ctx.send(
-            f"Uso: `!proximos [N] [time]` ou `!proximos [N] [liga] [time]`\n"
-            f"Ex: `!proximos Flamengo` (5 jogos) · `!proximos 10 Flamengo`\n"
-            f"· `!proximos brasil` · `!proximos 8 amistosos brasil`\n"
+            f"Uso: `!proximos [N] [dias] [liga] [time]`\n"
+            f"Ex: `!proximos Flamengo` (5 jogos · 90 dias)\n"
+            f"· `!proximos brasileirao` — só jogos da liga\n"
+            f"· `!proximos 10 Flamengo` · `!proximos 10 30 Flamengo`\n"
+            f"· `!proximos brasileirao Flamengo` · `!proximos 8 60 amistosos brasil`\n"
             f"Ligas: {ligas_disp}"
         )
         return
 
-    limite, liga_key, nome_time = _parse_proximos_args(primeiro, resto)
+    limite, dias, liga_key, nome_time = _parse_proximos_args(primeiro, resto)
 
-    if not nome_time:
-        await ctx.send(f"Informe o nome do time. Ex: `!proximos Flamengo` ou `!proximos 10 Flamengo`")
-        return
-
-    msg  = await ctx.send(f"🔍 Buscando os próximos **{limite}** jogos de **{nome_time}**...")
-    loop = asyncio.get_event_loop()
-
-    async def _enviar(jogos: list, nome_oficial: str, nome_liga: str):
-        try:
-            caminho = await gerar_proximos_png(jogos, nome_oficial, nome_liga)
-        except Exception as e:
-            await msg.edit(content=f"Erro ao gerar imagem: {e}")
-            return
-        await msg.delete()
-        v = _view_proximos(jogos)
-        send_kw = {"file": discord.File(caminho)}
-        if v is not None:
-            send_kw["view"] = v
-        await ctx.send(**send_kw)
-
-    eh_selecao = bool(_canonical_selecao(nome_time)) or (liga_key in _LIGAS_SELECAO)
-    if eh_selecao:
-        selecao_result = await loop.run_in_executor(
-            None,
-            functools.partial(buscar_proximos_selecao, nome_time, liga_key, limite=limite),
-        )
-        if selecao_result:
-            jogos, nome_oficial = selecao_result
-            if liga_key and liga_key in _LIGAS_SELECAO:
-                meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
-                nome_liga = f"{meta['emoji']} {meta['nome']}"
-            else:
-                nome_liga = "🌍 Seleções"
-            await _enviar(jogos, nome_oficial, nome_liga)
-            return
-        await msg.edit(
-            content=f"Nenhum jogo futuro encontrado para a seleção **{nome_time}**.",
+    if not nome_time and not liga_key:
+        await ctx.send(
+            "Informe o time ou a liga. Ex: `!proximos Flamengo`, `!proximos brasileirao` "
+            "ou `!proximos 10 30 copadomundo`"
         )
         return
 
-    # Prioridade: Bzzoiro (clubes)
-    bz_league_filter = _BZ_LIGA_TO_ID.get(liga_key) if liga_key else None
-    bz_result = await loop.run_in_executor(
-        None,
-        functools.partial(buscar_proximos_bzzoiro, nome_time, bz_league_filter, limite=limite),
+    await _responder_proximos_time(
+        nome_time, ctx=ctx, limite=limite, dias=dias, liga_key=liga_key,
     )
-    if bz_result:
-        jogos, nome_oficial = bz_result
-        if liga_key:
-            meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
-            nome_liga = f"{meta['emoji']} {meta['nome']}"
-        else:
-            nome_liga = ""  # liga badge por card
-        await _enviar(jogos, nome_oficial, nome_liga)
-        return
-
-    # Fallback: ESPN (liga de clubes especificada)
-    if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
-        selecao_result = await loop.run_in_executor(
-            None, functools.partial(buscar_proximos_selecao, nome_time, None, limite=limite),
-        )
-        if selecao_result:
-            jogos, nome_oficial = selecao_result
-            await _enviar(jogos, nome_oficial, "🌍 Seleções")
-            return
-        await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_time}**.")
-        return
-    slug      = LIGAS[liga_key]
-    resultado = await loop.run_in_executor(None, buscar_time_id, slug, nome_time)
-    if not resultado:
-        await msg.edit(content=f"Time `{nome_time}` não encontrado na liga `{liga_key}`.")
-        return
-    team_id, nome_oficial = resultado
-    jogos = await loop.run_in_executor(
-        None, functools.partial(buscar_proximos_espn_clube, slug, team_id, limite=limite),
-    )
-    if not jogos:
-        await msg.edit(content=f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
-        return
-    meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
-    nome_liga = f"{meta['emoji']} {meta['nome']}"
-    await _enviar(jogos, nome_oficial, nome_liga)
 
 
 @bot.command(name="chaveamento")
@@ -7102,10 +7383,12 @@ def _build_ajuda_embed() -> discord.Embed:
     embed.add_field(
         name="🔵  Times",
         value=(
-            "`!proximos [time]` — Próximos 5 jogos (padrão)\n"
+            "`!proximos [time]` — Próximos 5 jogos / 90 dias (padrão)\n"
+            "`!proximos brasileirao` — Próximos jogos só da liga\n"
             "`!proximos 10 Flamengo` — Quantidade opcional (máx. 25)\n"
+            "`!proximos 10 30 Flamengo` — Quantidade + horizonte em dias\n"
             "`!proximos brasil` — Seleção Brasileira\n"
-            "`!proximos [liga] [time]` ou `!proximos 10 [liga] [time]`\n"
+            "`!proximos [N] [dias] [liga] [time]`\n"
             "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
             "`!historico [time]` `/historico` — Partidas encerradas (últimos 90 dias)"
         ),
@@ -8316,83 +8599,35 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
-@bot.tree.command(name="proximos", description="Próximos jogos de um time")
+@bot.tree.command(name="proximos", description="Próximos jogos de um time ou de uma liga")
 @discord.app_commands.describe(
-    time="Nome do time",
-    liga="Liga (opcional — filtra por competição)",
+    time="Nome do time (opcional se informar liga)",
+    liga="Liga — filtra por competição ou lista só jogos dela",
     quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
+    dias="Horizonte em dias (padrão: 90, máx.: 365)",
 )
 @discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
 async def slash_proximos(
     interaction: discord.Interaction,
-    time: str,
+    time: str = "",
     liga: str = "",
     quantidade: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
 ):
-    await interaction.response.defer()
-    loop     = asyncio.get_event_loop()
-    limite   = _normalizar_limite_proximos(quantidade)
     liga_key = liga.lower() if liga.lower() in LIGAS else None
-    if liga_key:
-        meta      = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
-        nome_liga = f"{meta['emoji']} {meta['nome']}"
-    else:
-        nome_liga = ""
-    async def _enviar(jogos: list, nome_oficial: str, nl: str):
-        try:
-            caminho = await gerar_proximos_png(jogos, nome_oficial, nl)
-        except Exception as e:
-            await interaction.followup.send(f"Erro ao gerar imagem: {e}")
-            return
-        v = _view_proximos(jogos)
-        send_kw = {"file": discord.File(caminho)}
-        if v is not None:
-            send_kw["view"] = v
-        await interaction.followup.send(**send_kw)
-
-    eh_selecao = bool(_canonical_selecao(time)) or (liga_key in _LIGAS_SELECAO)
-    if eh_selecao:
-        selecao_result = await loop.run_in_executor(
-            None, functools.partial(buscar_proximos_selecao, time, liga_key, limite=limite),
+    if not (time or "").strip() and not liga_key:
+        await interaction.response.send_message(
+            "Informe o time ou a liga. Ex: `/proximos time:Flamengo` ou `/proximos liga:brasileirao`",
+            ephemeral=True,
         )
-        if selecao_result:
-            jogos, nome_oficial = selecao_result
-            await _enviar(jogos, nome_oficial, nome_liga or "🌍 Seleções")
-            return
-        await interaction.followup.send(f"Nenhum jogo futuro encontrado para a seleção **{time}**.")
         return
-
-    bz_league_filter = _BZ_LIGA_TO_ID.get(liga_key) if liga_key else None
-    bz_result = await loop.run_in_executor(
-        None, functools.partial(buscar_proximos_bzzoiro, time, bz_league_filter, limite=limite),
+    await _responder_proximos_time(
+        time.strip(),
+        interaction=interaction,
+        limite=quantidade,
+        dias=dias,
+        liga_key=liga_key,
     )
-    if bz_result:
-        jogos, nome_oficial = bz_result
-        await _enviar(jogos, nome_oficial, nome_liga)
-        return
-    if not liga_key or liga_key in LIGAS_COPA or not LIGAS.get(liga_key):
-        selecao_result = await loop.run_in_executor(
-            None, functools.partial(buscar_proximos_selecao, time, None, limite=limite),
-        )
-        if selecao_result:
-            jogos, nome_oficial = selecao_result
-            await _enviar(jogos, nome_oficial, "🌍 Seleções")
-            return
-        await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{time}**.")
-        return
-    resultado = await loop.run_in_executor(None, buscar_time_id, LIGAS[liga_key], time)
-    if not resultado:
-        await interaction.followup.send(f"Time `{time}` não encontrado.")
-        return
-    team_id, nome_oficial = resultado
-    jogos = await loop.run_in_executor(
-        None,
-        functools.partial(buscar_proximos_espn_clube, LIGAS[liga_key], team_id, limite=limite),
-    )
-    if not jogos:
-        await interaction.followup.send(f"Nenhum jogo futuro encontrado para **{nome_oficial}**.")
-        return
-    await _enviar(jogos, nome_oficial, nome_liga)
 
 
 @bot.tree.command(name="partida", description="Detalhes da partida mais recente de um time")
