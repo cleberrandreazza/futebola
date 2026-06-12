@@ -4295,17 +4295,84 @@ def _espn_resultado_1x2(jogo: dict) -> str | None:
     return "X"
 
 
-def _resultado_aposta_1x2(event_id: str) -> str | None:
+def _espn_resultado_1x2_summary(slug: str, espn_id: str) -> str | None:
+    """Resultado via summary ESPN — funciona após meia-noite e fora do placar do dia."""
+    sumario = buscar_partida_espn(slug, espn_id)
+    if not sumario:
+        return None
+    header = sumario.get("header") or {}
+    comp = (header.get("competitions") or [{}])[0]
+    status_type = (comp.get("status") or {}).get("type") or {}
+    state = status_type.get("state", "pre")
+    name = (status_type.get("name") or "").upper()
+    detail = (status_type.get("detail") or "").lower()
+
+    if state != "post" and name not in ("STATUS_FULL_TIME", "STATUS_FINAL", "STATUS_END"):
+        if any(x in detail for x in ("cancel", "postpon", "abandon", "suspend")):
+            return "cancel"
+        if any(x in name for x in ("CANCELED", "CANCELLED", "POSTPONED", "ABANDONED")):
+            return "cancel"
+        return None
+
+    competitors = comp.get("competitors") or []
+    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+    hs = _safe_score(home)
+    as_ = _safe_score(away)
+    if hs is None or as_ is None:
+        return None
+    if hs > as_:
+        return "1"
+    if hs < as_:
+        return "2"
+    return "X"
+
+
+def _resultado_aposta_1x2(event_id: str, bet: dict | None = None) -> str | None:
     """Resultado 1/X/2 (ou 'cancel') para liquidação — Bzzoiro ou ESPN."""
     parsed = _parse_espn_aposta_event_id(event_id)
     if parsed:
         slug, espn_id = parsed
+        res = _espn_resultado_1x2_summary(slug, espn_id)
+        if res is not None:
+            return res
         jogo = _espn_fixture_por_id(slug, espn_id)
-        return _espn_resultado_1x2(jogo) if jogo else None
-    ev = _bzzoiro_get(f"events/{event_id}/")
-    if not ev or ev.get("error"):
+        if jogo:
+            res = _espn_resultado_1x2(jogo)
+            if res is not None:
+                return res
+        if bet and bet.get("matchKey"):
+            dia_str = str(bet["matchKey"]).split("|", 1)[0]
+            try:
+                dia = date.fromisoformat(dia_str)
+                for jogo in buscar_jogos_do_dia(slug, dia.strftime("%Y%m%d")):
+                    if str(jogo.get("fixture", {}).get("id")) == str(espn_id):
+                        return _espn_resultado_1x2(jogo)
+            except ValueError:
+                pass
         return None
-    return _bz_resultado_1x2(ev)
+
+    ev = _bzzoiro_get(f"events/{event_id}/")
+    if ev and not ev.get("error"):
+        return _bz_resultado_1x2(ev)
+
+    if bet:
+        home = bet.get("home") or ""
+        away = bet.get("away") or ""
+        dia: date | None = None
+        mk = bet.get("matchKey")
+        if mk and "|" in str(mk):
+            try:
+                dia = date.fromisoformat(str(mk).split("|", 1)[0])
+            except ValueError:
+                pass
+        if home and away:
+            bz_id = _find_bz_event_id(home, away, dia=dia)
+            if bz_id:
+                ev2 = _bzzoiro_get(f"events/{bz_id}/")
+                if ev2 and not ev2.get("error"):
+                    return _bz_resultado_1x2(ev2)
+    return None
 
 
 def _evento_e_apostavel(ev: dict) -> bool:
@@ -4466,6 +4533,50 @@ def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None
     else:
         embed.set_footer(text="Use /saldo para ver sua conta · apostas fictícias")
     return embed
+
+
+def _canal_apostas_publico() -> int:
+    """Canal para avisos públicos de apostas (ranking pós-partida)."""
+    return CANAL_COMANDOS_ID or CANAL_RESUMO_ID
+
+
+async def _publicar_ranking_pos_partida(home: str, away: str, resultado: str) -> None:
+    """Publica o mesmo embed de /rank-apostas após liquidar apostas de uma partida."""
+    canal_id = _canal_apostas_publico()
+    if not canal_id:
+        print(
+            "[Apostas] CANAL_COMANDOS / CANAL_JOGOS_DO_DIA não configurado — ranking não publicado.",
+            flush=True,
+        )
+        return
+
+    canal = bot.get_channel(canal_id)
+    if canal is None:
+        try:
+            canal = await bot.fetch_channel(canal_id)
+        except Exception as e:
+            print(f"[Apostas] Canal ranking {canal_id}: {e}", flush=True)
+            return
+    if not hasattr(canal, "send"):
+        print(f"[Apostas] Canal {canal_id} não aceita mensagens.", flush=True)
+        return
+
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, _apostas_ranking, "saldo", 15)
+    embed = _embed_ranking(rows, "saldo")
+    if resultado == "cancel":
+        intro = f"⚠️ **{home} × {away}** — partida cancelada · apostas estornadas"
+    else:
+        intro = (
+            f"🏁 **{home} × {away}** — fim de jogo · "
+            f"{_palpite_label(resultado, home, away)}\n"
+            f"Apostas liquidadas · ranking atualizado:"
+        )
+    try:
+        await canal.send(content=intro, embed=embed)
+        print(f"[Apostas] Ranking publicado após {home}×{away}", flush=True)
+    except Exception as e:
+        print(f"[Apostas] Erro ao publicar ranking: {e}", flush=True)
 
 
 def _format_ranking_resumo(rows: list[dict] | None = None, limit: int = 5) -> str:
@@ -4866,12 +4977,13 @@ async def liquidar_apostas():
 
     eventos_cache: dict[str, str | None] = {}
     loop = asyncio.get_event_loop()
+    partidas_liquidadas: dict[str, dict] = {}
 
     for bet in abertas:
         eid = str(bet.get("eventId", ""))
         if eid not in eventos_cache:
             eventos_cache[eid] = await loop.run_in_executor(
-                None, _resultado_aposta_1x2, eid
+                None, functools.partial(_resultado_aposta_1x2, eid, bet)
             )
         res = eventos_cache[eid]
         if res is None:
@@ -4888,7 +5000,18 @@ async def liquidar_apostas():
         if ok:
             home = bet.get("home", "?")
             away = bet.get("away", "?")
-            print(f"[Apostas] Liquidada {aposta_id}: {home}×{away} → {res}")
+            print(f"[Apostas] Liquidada {aposta_id}: {home}×{away} → {res}", flush=True)
+            chave = str(bet.get("matchKey") or eid)
+            if chave not in partidas_liquidadas:
+                partidas_liquidadas[chave] = {"home": home, "away": away, "res": res}
+        else:
+            print(
+                f"[Apostas] Falha ao liquidar {aposta_id} ({bet.get('home')}×{bet.get('away')})",
+                flush=True,
+            )
+
+    for info in partidas_liquidadas.values():
+        await _publicar_ranking_pos_partida(info["home"], info["away"], info["res"])
 
 
 @liquidar_apostas.before_loop

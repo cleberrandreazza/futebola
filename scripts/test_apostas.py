@@ -286,11 +286,81 @@ def test_duplicata_match_key() -> None:
     print("OK duplicata — matchKey bloqueia IDs diferentes na mesma partida")
 
 
+def test_espn_liquidacao_summary() -> None:
+    import bot
+    from unittest.mock import patch
+
+    sumario_ft = {
+        "header": {
+            "competitions": [{
+                "status": {"type": {"state": "post", "name": "STATUS_FULL_TIME"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "2"},
+                    {"homeAway": "away", "score": "1"},
+                ],
+            }],
+        },
+    }
+    with patch.object(bot, "buscar_partida_espn", return_value=sumario_ft):
+        assert bot._espn_resultado_1x2_summary("fifa.world", "760414") == "1"
+
+    with patch.object(bot, "buscar_partida_espn", return_value=sumario_ft), patch.object(
+        bot, "_espn_fixture_por_id", return_value=None
+    ):
+        assert bot._resultado_aposta_1x2("espn:fifa.world:760414") == "1"
+
+    sumario_pre = {
+        "header": {
+            "competitions": [{
+                "status": {"type": {"state": "pre", "name": "STATUS_SCHEDULED"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "0"},
+                    {"homeAway": "away", "score": "0"},
+                ],
+            }],
+        },
+    }
+    with patch.object(bot, "buscar_partida_espn", return_value=sumario_pre), patch.object(
+        bot, "_espn_fixture_por_id", return_value=None
+    ):
+        assert bot._resultado_aposta_1x2("espn:fifa.world:999") is None
+
+    print("OK liquidação ESPN — summary fora do placar do dia")
+
+
+async def test_publicar_ranking_pos_partida() -> None:
+    import bot
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    canal = MagicMock()
+    canal.send = AsyncMock()
+    mock_bot = MagicMock()
+    mock_bot.get_channel.return_value = canal
+
+    rows = [{"userId": "1", "displayName": "Test", "saldo": 100, "totalGanho": 0,
+             "apostasGanhas": 0, "apostasPerdidas": 0}]
+    with patch.object(bot, "bot", mock_bot), patch.object(
+        bot, "_apostas_ranking", return_value=rows
+    ), patch.object(bot, "CANAL_COMANDOS_ID", 999):
+        await bot._publicar_ranking_pos_partida("Casa", "Fora", "1")
+
+    canal.send.assert_awaited_once()
+    args, kwargs = canal.send.await_args
+    assert "Casa" in kwargs["content"] and "Fora" in kwargs["content"]
+    assert kwargs["embed"].title.startswith("🏆 Ranking")
+
+    print("OK publicar ranking — embed de /rank-apostas após liquidação")
+
+
 def main() -> int:
     print("=== Regra notstarted ===")
     test_evento_apostavel()
     print("\n=== Duplicata matchKey ===")
     test_duplicata_match_key()
+    print("\n=== Liquidação ESPN summary ===")
+    test_espn_liquidacao_summary()
+    print("\n=== Publicar ranking pós-partida ===")
+    asyncio.run(test_publicar_ranking_pos_partida())
     print("\n=== Escopo /hoje ===")
     test_eventos_apostaveis_escopo()
     print("\n=== Convex API ===")
