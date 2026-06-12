@@ -4700,13 +4700,68 @@ def _parse_espn_aposta_event_id(event_id: str) -> tuple[str, str] | None:
     return parts[1], parts[2]
 
 
-def _espn_fixture_por_id(slug: str, espn_id: str) -> dict | None:
-    """Fixture interna do /hoje para um event_id ESPN (somente hoje BRT)."""
-    hoje_str = datetime.now(tz=BRT).strftime("%Y%m%d")
-    for jogo in buscar_jogos_do_dia(slug, hoje_str):
-        if str(jogo.get("fixture", {}).get("id")) == str(espn_id):
-            return jogo
+def _espn_fixture_por_id(
+    slug: str,
+    espn_id: str,
+    dias: list[date] | None = None,
+) -> dict | None:
+    """Fixture interna para um event_id ESPN — hoje e amanhã (BRT) por padrão."""
+    hoje = datetime.now(tz=BRT).date()
+    dias_busca = dias or [hoje, hoje + timedelta(days=1)]
+    vistos: set[str] = set()
+    for dia in dias_busca:
+        ds = dia.strftime("%Y%m%d")
+        if ds in vistos:
+            continue
+        vistos.add(ds)
+        for jogo in buscar_jogos_do_dia(slug, ds):
+            if str(jogo.get("fixture", {}).get("id")) == str(espn_id):
+                return jogo
     return None
+
+
+def _espn_jogo_from_summary(sumario: dict, slug: str, espn_id: str) -> dict | None:
+    """Converte summary ESPN no formato fixture usado nas apostas."""
+    header = sumario.get("header") or {}
+    comp = (header.get("competitions") or [{}])[0]
+    competitors = comp.get("competitors") or []
+    if not competitors:
+        return None
+    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+    home_team = home.get("team") or {}
+    away_team = away.get("team") or {}
+
+    status_type = (comp.get("status") or {}).get("type") or {}
+    state = status_type.get("state") or "pre"
+    type_name = status_type.get("name") or ""
+    if state == "pre":
+        short = "NS"
+    elif state == "post":
+        short = "FT"
+    elif type_name == "STATUS_HALFTIME":
+        short = "HT"
+    else:
+        short = "1H"
+
+    return {
+        "fixture": {
+            "id": espn_id,
+            "date": comp.get("date") or header.get("date") or "",
+            "status": {"short": short},
+        },
+        "teams": {
+            "home": {
+                "name": home_team.get("displayName", "?"),
+                "logo": home_team.get("logo", ""),
+            },
+            "away": {
+                "name": away_team.get("displayName", "?"),
+                "logo": away_team.get("logo", ""),
+            },
+        },
+        "goals": {"home": _safe_score(home), "away": _safe_score(away)},
+    }
 
 
 def _espn_jogo_para_aposta(jogo: dict, slug: str) -> dict:
@@ -4790,9 +4845,11 @@ def _resultado_aposta_1x2(event_id: str, bet: dict | None = None) -> str | None:
             dia_str = str(bet["matchKey"]).split("|", 1)[0]
             try:
                 dia = date.fromisoformat(dia_str)
-                for jogo in buscar_jogos_do_dia(slug, dia.strftime("%Y%m%d")):
-                    if str(jogo.get("fixture", {}).get("id")) == str(espn_id):
-                        return _espn_resultado_1x2(jogo)
+                jogo = _espn_fixture_por_id(slug, espn_id, dias=[dia])
+                if jogo:
+                    res = _espn_resultado_1x2(jogo)
+                    if res is not None:
+                        return res
             except ValueError:
                 pass
         return None
@@ -4831,6 +4888,10 @@ def _validar_evento_apostavel(event_id: str) -> dict:
     if parsed:
         slug, espn_id = parsed
         jogo = _espn_fixture_por_id(slug, espn_id)
+        if not jogo:
+            sumario = buscar_partida_espn(slug, espn_id)
+            if sumario:
+                jogo = _espn_jogo_from_summary(sumario, slug, espn_id)
         if not jogo:
             return {"ok": False, "error": "Partida não encontrada."}
         short = jogo.get("fixture", {}).get("status", {}).get("short", "")

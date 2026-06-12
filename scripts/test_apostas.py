@@ -205,7 +205,7 @@ def test_eventos_apostaveis_escopo() -> None:
     import bot
     from unittest.mock import patch
 
-    def fake_liga(chave: str):
+    def fake_liga(chave: str, dia=None):
         if chave == "copadomundo":
             return [{
                 "fixture": {"id": "espn1", "date": "", "status": {"short": "NS", "elapsed": None}},
@@ -223,7 +223,7 @@ def test_eventos_apostaveis_escopo() -> None:
             return {"results": []}
         return {"error": True}
 
-    with patch.object(bot, "_buscar_jogos_liga_hoje", side_effect=fake_liga), patch.object(
+    with patch.object(bot, "_buscar_jogos_liga_dia", side_effect=fake_liga), patch.object(
         bot, "_bzzoiro_get", side_effect=bz_get
     ), patch.object(bot, "_find_bz_event_id", return_value=None):
         eventos = bot._bz_eventos_apostaveis()
@@ -346,6 +346,39 @@ def test_espn_liquidacao_summary() -> None:
     print("OK liquidação ESPN — summary fora do placar do dia")
 
 
+def test_espn_validar_amanha() -> None:
+    """Partida de amanhã no placar ESPN deve passar na validação de aposta."""
+    import bot
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    amanha = bot.datetime.now(tz=bot.BRT).date() + timedelta(days=1)
+    jogo_amanha = {
+        "fixture": {"id": "760999", "date": f"{amanha.isoformat()}T01:00:00Z", "status": {"short": "NS"}},
+        "teams": {
+            "home": {"name": "Haiti", "logo": ""},
+            "away": {"name": "Scotland", "logo": ""},
+        },
+        "goals": {"home": None, "away": None},
+    }
+
+    def _fixture(slug, espn_id, dias=None):
+        if str(espn_id) != "760999":
+            return None
+        if dias and amanha not in dias:
+            return None
+        return jogo_amanha
+
+    with patch.object(bot, "_espn_fixture_por_id", side_effect=_fixture), patch.object(
+        bot, "buscar_partida_espn", return_value=None
+    ):
+        chk = bot._validar_evento_apostavel("espn:fifa.world:760999")
+        assert chk.get("ok"), chk
+        assert chk["event"]["home_team"] == "Haiti"
+
+    print("OK validação ESPN — partida de amanhã")
+
+
 async def test_publicar_ranking_pos_partida() -> None:
     import bot
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -379,6 +412,7 @@ def main() -> int:
     test_ranking_sort_vitorias()
     print("\n=== Liquidação ESPN summary ===")
     test_espn_liquidacao_summary()
+    test_espn_validar_amanha()
     print("\n=== Publicar ranking pós-partida ===")
     asyncio.run(test_publicar_ranking_pos_partida())
     print("\n=== Escopo /hoje ===")
