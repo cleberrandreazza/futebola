@@ -4317,6 +4317,51 @@ def _palpite_label(p: str, home: str, away: str) -> str:
     return "Empate"
 
 
+def _fmt_creditos_aposta(n: int | float) -> str:
+    return f"{int(n):,}".replace(",", ".")
+
+
+def _status_aposta_label(st: str) -> str:
+    return {
+        "aberta": "Aguardando jogo",
+        "ganhou": "Ganhou",
+        "perdeu": "Perdeu",
+        "cancelada": "Devolvida",
+    }.get(st, st)
+
+
+def _linha_minhas_apostas(b: dict) -> str:
+    st = b.get("status", "?")
+    em = {"aberta": "⏳", "ganhou": "✅", "perdeu": "❌", "cancelada": "↩️"}.get(st, "•")
+    home = b.get("home", "?")
+    away = b.get("away", "?")
+    palpite_txt = _palpite_label(b.get("palpite", "?"), home, away)
+    valor = int(b.get("valor", 0))
+    retorno = int(b.get("retornoPotencial", 0))
+    status_txt = _status_aposta_label(st)
+
+    linhas = [
+        f"{em} **{home} × {away}**",
+        f"Apostou **{_fmt_creditos_aposta(valor)} créditos** em **{palpite_txt}** "
+        f"(odd **{APOSTA_ODD:.1f}x**)",
+    ]
+    if st == "aberta":
+        linhas.append(f"Se acertar: **+{_fmt_creditos_aposta(retorno)} créditos** · _{status_txt}_")
+    elif st == "ganhou":
+        lucro = retorno - valor
+        linhas.append(
+            f"Recebeu **+{_fmt_creditos_aposta(retorno)} créditos** "
+            f"(lucro **+{_fmt_creditos_aposta(lucro)}**) · _{status_txt}_"
+        )
+    elif st == "perdeu":
+        linhas.append(f"Perdeu **{_fmt_creditos_aposta(valor)} créditos** · _{status_txt}_")
+    elif st == "cancelada":
+        linhas.append(f"**{_fmt_creditos_aposta(valor)} créditos** devolvidos · _{status_txt}_")
+    else:
+        linhas.append(f"_{status_txt}_")
+    return "\n".join(linhas)
+
+
 def _is_discord_user_id(user_id: str) -> bool:
     return bool(re.fullmatch(r"\d{17,20}", str(user_id)))
 
@@ -8879,23 +8924,17 @@ async def slash_minhas_apostas(interaction: discord.Interaction):
         await interaction.followup.send("📭 Você ainda não fez nenhuma aposta.")
         return
 
-    status_emoji = {"aberta": "⏳", "ganhou": "✅", "perdeu": "❌", "cancelada": "↩️"}
-    linhas: list[str] = []
-    for b in bets:
-        st = b.get("status", "?")
-        em = status_emoji.get(st, "•")
-        home, away = b.get("home", "?"), b.get("away", "?")
-        pal = b.get("palpite", "?")
-        val = b.get("valor", 0)
-        ret = b.get("retornoPotencial", 0)
-        linhas.append(
-            f"{em} **{home} × {away}** — palpite **{pal}** · **{val:,}** → **{ret:,}** ({st})".replace(",", ".")
-        )
+    abertas = sum(1 for b in bets if b.get("status") == "aberta")
+    blocos = [_linha_minhas_apostas(b) for b in bets[:12]]
     embed = discord.Embed(
         title="🎰 Suas apostas",
-        description="\n".join(linhas[:12]),
+        description="\n\n".join(blocos),
         color=0xF59E0B,
     )
+    footer = f"{len(bets)} aposta(s) listada(s)"
+    if abertas:
+        footer += f" · {abertas} aguardando resultado"
+    embed.set_footer(text=footer)
     await interaction.followup.send(embed=embed)
 
 
