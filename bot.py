@@ -3296,7 +3296,6 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 async def gerar_resumo_diario_png(
     jogos_por_liga: dict,
     data_display: str = None,
-    ranking: list[dict] | None = None,
 ) -> str:
     """
     jogos_por_liga: {"brasileirao": [...], "premierleague": [...], ...}
@@ -3408,16 +3407,7 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
 .lbl.inter{color:#fbbf24}
 .sigla{background:#0f3460;color:#ccc;padding:2px 5px;border-radius:3px;font-size:10px;font-weight:700}
 .vazio{color:#8892a4;text-align:center;padding:40px;font-size:14px}
-.rank-secao{margin-top:22px;padding-top:16px;border-top:2px solid #0f3460}
-.rank-item{display:flex;align-items:center;gap:8px;background:#1a2a5e;margin-bottom:4px;
-           padding:8px 12px;border-radius:8px;font-size:12px}
-.rank-pos{width:28px;flex-shrink:0;font-weight:700}
-.rank-nome{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rank-saldo{color:#93c5fd;font-weight:700;flex-shrink:0}
-.rank-wl{color:#8892a4;font-size:10px;flex-shrink:0}
 """
-
-    rank_html = _html_ranking_resumo(ranking or [], limit=5)
 
     html = (
         f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
@@ -3427,7 +3417,6 @@ body{background:#16213e;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;wi
         f'  <div class="data">{data_hoje} · {total_jogos} jogos em {len(jogos_por_liga)} ligas</div>'
         f'</div>'
         f'{secoes_html}'
-        f'{rank_html}'
         f'</body></html>'
     )
 
@@ -5343,23 +5332,12 @@ async def resumo_diario():
             break
 
     if not jogos_por_liga:
-        loop = asyncio.get_event_loop()
-        ranking = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 5)
-        texto = "📭 Nenhum jogo encontrado hoje em nenhuma liga."
-        ranking_txt = _format_ranking_resumo(ranking)
-        if ranking_txt:
-            texto = f"{texto}\n\n{ranking_txt}"
-        await canal.send(texto)
+        await canal.send("📭 Nenhum jogo encontrado hoje em nenhuma liga.")
         return
 
-    loop = asyncio.get_event_loop()
-    ranking = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 5)
     total = sum(len(v) for v in jogos_por_liga.values())
-    img = await gerar_resumo_diario_png(jogos_por_liga, ranking=ranking)
+    img = await gerar_resumo_diario_png(jogos_por_liga)
     content = f"📅 **Jogos do Dia** — {total} partidas em {len(jogos_por_liga)} ligas"
-    ranking_txt = _format_ranking_resumo(ranking)
-    if ranking_txt:
-        content = f"{content}\n\n{ranking_txt}"
     await canal.send(content=content, file=discord.File(img))
     print(f"[Resumo] Enviado: {total} jogos em {len(jogos_por_liga)} ligas.")
 
