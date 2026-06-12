@@ -1418,6 +1418,10 @@ _SELECOES_ALIASES: dict[str, str] = {
     "mexico": "Mexico", "méxico": "Mexico",
     "eua": "United States", "estados unidos": "United States",
     "usa": "United States",
+    "coreia": "South Korea", "coreia do sul": "South Korea",
+    "south korea": "South Korea", "korea republic": "South Korea",
+    "republica tcheca": "Czechia", "república tcheca": "Czechia",
+    "czech republic": "Czechia", "czechia": "Czechia",
 }
 _LIGAS_SELECAO = frozenset({"amistosos", "copadomundo"})
 
@@ -4001,10 +4005,16 @@ def _apostas_place(
     away: str,
     palpite: str,
     valor: int,
+    event_date: str | None = None,
+    match_key: str | None = None,
 ) -> dict:
     chk = _validar_evento_apostavel(event_id)
     if not chk.get("ok"):
         return {"ok": False, "error": chk.get("error", "Partida indisponível para aposta.")}
+
+    mk = match_key or _aposta_match_key(home, away, event_date)
+    if _apostas_has_open_on_match(user_id, mk, str(event_id)):
+        return {"ok": False, "error": "Você já tem uma aposta aberta nesta partida."}
 
     if _convex_client:
         r = _convex_mutation(
@@ -4013,6 +4023,7 @@ def _apostas_place(
                 "userId": user_id,
                 "displayName": display_name,
                 "eventId": event_id,
+                "matchKey": mk,
                 "home": home,
                 "away": away,
                 "palpite": palpite,
@@ -4034,7 +4045,7 @@ def _apostas_place(
     if ap["saldo"] < valor:
         return {"ok": False, "error": f"Saldo insuficiente ({ap['saldo']} créditos)."}
     for b in data["apostas"]:
-        if b["userId"] == user_id and b["status"] == "aberta" and b["eventId"] == event_id:
+        if b.get("userId") == user_id and _bet_conflicts_open(b, mk, str(event_id)):
             return {"ok": False, "error": "Você já tem uma aposta aberta nesta partida."}
 
     retorno = int(valor * APOSTA_ODD)
@@ -4045,6 +4056,7 @@ def _apostas_place(
         "_id": bet_id,
         "userId": user_id,
         "eventId": event_id,
+        "matchKey": mk,
         "home": home,
         "away": away,
         "palpite": palpite,
@@ -4161,6 +4173,77 @@ def _apostas_credito_semanal() -> int:
 
 def _espn_aposta_event_id(slug: str, espn_id: str | int) -> str:
     return f"espn:{slug}:{espn_id}"
+
+
+def _norm_aposta_team(name: str) -> str:
+    """Nome canônico para chave de partida (aliases ESPN/Bzzoiro/seleções)."""
+    raw = (name or "").strip()
+    if not raw:
+        return "?"
+    canon = _canonical_selecao(raw)
+    if canon:
+        return _strip_accents(canon).lower()
+    low = _strip_accents(raw).lower()
+    low = re.sub(r"\s+", " ", low)
+    for _k, v in _SELECOES_NORM.items():
+        if low == _k or low == _strip_accents(v).lower():
+            return _strip_accents(v).lower()
+    for bz, espn in _BZ_ESPN_ALIASES.items():
+        bz_n = _strip_accents(bz).lower()
+        espn_n = _strip_accents(espn).lower()
+        if low == bz_n or low == espn_n:
+            return bz_n
+    return low
+
+
+def _aposta_match_date(event_date: str | None) -> str:
+    if event_date:
+        try:
+            dt = datetime.fromisoformat(event_date.replace("Z", "+00:00")).astimezone(BRT)
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return datetime.now(tz=BRT).strftime("%Y-%m-%d")
+
+
+def _aposta_match_key(home: str, away: str, event_date: str | None = None) -> str:
+    """Chave única da partida — independe de eventId Bzzoiro vs ESPN."""
+    t1, t2 = sorted([_norm_aposta_team(home), _norm_aposta_team(away)])
+    return f"{_aposta_match_date(event_date)}|{t1}|{t2}"
+
+
+def _aposta_match_key_from_ev(ev: dict) -> str:
+    home = ev.get("home_team") or ev.get("home") or "?"
+    away = ev.get("away_team") or ev.get("away") or "?"
+    ed = ev.get("event_date") or ""
+    return _aposta_match_key(home, away, ed or None)
+
+
+def _bet_conflicts_open(bet: dict, match_key: str, event_id: str) -> bool:
+    if bet.get("status") != "aberta":
+        return False
+    mk = bet.get("matchKey")
+    if mk and mk == match_key:
+        return True
+    if str(bet.get("eventId", "")) == str(event_id):
+        return True
+    if not mk:
+        legacy = _aposta_match_key(bet.get("home", ""), bet.get("away", ""))
+        if legacy == match_key:
+            return True
+    return False
+
+
+def _apostas_has_open_on_match(user_id: str, match_key: str, event_id: str) -> bool:
+    if _convex_client:
+        rows = _convex_query("apostas:listByUser", {"userId": user_id, "limit": 50})
+        if rows is not None:
+            return any(_bet_conflicts_open(b, match_key, event_id) for b in rows)
+    data = _carregar_apostas_local()
+    for b in data.get("apostas", []):
+        if _bet_conflicts_open(b, match_key, event_id) and b.get("userId") == user_id:
+            return True
+    return False
 
 
 def _parse_espn_aposta_event_id(event_id: str) -> tuple[str, str] | None:
@@ -4299,12 +4382,18 @@ def _bz_eventos_apostaveis() -> list[dict]:
     """Partidas apostáveis hoje — mesmas ligas e jogos NS do /hoje (sem extras do Bzzoiro)."""
     hoje = datetime.now(tz=BRT).date()
     por_id: dict[str, dict] = {}
+    por_match: set[str] = set()
 
     for chave in LIGAS_APOSTAS:
         for jogo in _buscar_jogos_liga_hoje(chave):
             ev = _jogo_hoje_para_apostavel(jogo, chave, dia=hoje)
-            if ev:
-                por_id[str(ev["id"])] = ev
+            if not ev:
+                continue
+            mk = _aposta_match_key_from_ev(ev)
+            if mk in por_match:
+                continue
+            por_match.add(mk)
+            por_id[str(ev["id"])] = ev
 
     out = list(por_id.values())
     out.sort(key=lambda e: e.get("event_date", ""))
@@ -7539,6 +7628,7 @@ class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
 
         home = self.ev.get("home_team", "?")
         away = self.ev.get("away_team", "?")
+        mk = _aposta_match_key_from_ev(self.ev)
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
@@ -7550,6 +7640,8 @@ class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
             away,
             self.palpite,
             valor,
+            self.ev.get("event_date"),
+            mk,
         )
         if not result.get("ok"):
             await interaction.response.send_message(f"❌ {result.get('error', 'Erro')}", ephemeral=True)
@@ -7600,6 +7692,13 @@ class ApostaPalpiteView(discord.ui.View):
             return
         if chk.get("event"):
             self.ev = chk["event"]
+        mk = _aposta_match_key_from_ev(self.ev)
+        if _apostas_has_open_on_match(str(self.uid), mk, str(self.ev.get("id"))):
+            await interaction.response.send_message(
+                "❌ Você já tem uma aposta aberta nesta partida.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(
             ApostaValorModal(self.ev, palpite, self.uid, self.display_name)
         )
@@ -7641,6 +7740,13 @@ class ApostaSelectView(discord.ui.View):
             ev = chk["event"]
         home = ev.get("home_team", "?")
         away = ev.get("away_team", "?")
+        mk = _aposta_match_key_from_ev(ev)
+        if _apostas_has_open_on_match(str(self.uid), mk, str(ev.get("id"))):
+            await interaction.response.send_message(
+                "❌ Você já tem uma aposta aberta nesta partida.",
+                ephemeral=True,
+            )
+            return
         view = ApostaPalpiteView(ev, self.uid, self.display_name)
         await interaction.response.send_message(
             f"🎰 **{home} × {away}** — escolha o palpite (odd **{APOSTA_ODD:.1f}x**):",

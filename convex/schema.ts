@@ -34,6 +34,7 @@ export default defineSchema({
   apostas: defineTable({
     userId: v.string(),
     eventId: v.string(),
+    matchKey: v.optional(v.string()),
     home: v.string(),
     away: v.string(),
     palpite: v.union(v.literal("1"), v.literal("X"), v.literal("2")),
@@ -51,5 +52,6 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_status", ["status"])
-    .index("by_event", ["eventId"]),
+    .index("by_event", ["eventId"])
+    .index("by_user_and_match", ["userId", "matchKey"]),
 });

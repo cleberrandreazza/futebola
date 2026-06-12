@@ -31,6 +31,7 @@ const apostaValidator = v.object({
   _id: v.id("apostas"),
   userId: v.string(),
   eventId: v.string(),
+  matchKey: v.optional(v.string()),
   home: v.string(),
   away: v.string(),
   palpite: palpiteValidator,
@@ -160,6 +161,7 @@ export const placeBet = mutation({
     userId: v.string(),
     displayName: v.string(),
     eventId: v.string(),
+    matchKey: v.string(),
     home: v.string(),
     away: v.string(),
     palpite: palpiteValidator,
@@ -215,7 +217,9 @@ export const placeBet = mutation({
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     const duplicada = abertas.some(
-      (a) => a.status === "aberta" && a.eventId === args.eventId
+      (a) =>
+        a.status === "aberta" &&
+        (a.matchKey === args.matchKey || a.eventId === args.eventId)
     );
     if (duplicada) {
       return {
@@ -231,6 +235,7 @@ export const placeBet = mutation({
     const apostaId = await ctx.db.insert("apostas", {
       userId: args.userId,
       eventId: args.eventId,
+      matchKey: args.matchKey,
       home: args.home,
       away: args.away,
       palpite: args.palpite,
@@ -264,6 +269,7 @@ export const listOpen = query({
       _id: d._id,
       userId: d.userId,
       eventId: d.eventId,
+      matchKey: d.matchKey,
       home: d.home,
       away: d.away,
       palpite: d.palpite,
@@ -296,6 +302,7 @@ export const listByUser = query({
       _id: d._id,
       userId: d.userId,
       eventId: d.eventId,
+      matchKey: d.matchKey,
       home: d.home,
       away: d.away,
       palpite: d.palpite,

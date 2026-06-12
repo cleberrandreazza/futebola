@@ -76,6 +76,7 @@ def test_convex_api() -> None:
                         "userId": uid,
                         "displayName": name,
                         "eventId": "test_event_1",
+                        "matchKey": "2026-06-11|time a|time b",
                         "home": "Time A",
                         "away": "Time B",
                         "palpite": "X",
@@ -256,9 +257,40 @@ def test_evento_apostavel() -> None:
     print("OK regra — só partidas notstarted")
 
 
+def test_duplicata_match_key() -> None:
+    import bot
+    from unittest.mock import patch
+
+    uid = f"dup_{int(time.time())}"
+    ed = "2026-06-11T23:00:00+00:00"
+    mk = bot._aposta_match_key("South Korea", "Czechia", ed)
+    mk_alias = bot._aposta_match_key("Korea Republic", "Czechia", ed)
+    assert mk == mk_alias, (mk, mk_alias)
+
+    ok_ev = {"ok": True, "event": {"status": "notstarted"}}
+    with patch.object(bot, "_convex_client", None), patch.object(
+        bot, "_validar_evento_apostavel", return_value=ok_ev
+    ):
+        r1 = bot._apostas_place(
+            uid, "Dup Test", "espn:fifa.world:760414",
+            "South Korea", "Czechia", "1", bot.APOSTA_MINIMA, ed, mk,
+        )
+        assert r1.get("ok"), r1
+        r2 = bot._apostas_place(
+            uid, "Dup Test", "760414",
+            "Korea Republic", "Czechia", "X", bot.APOSTA_MINIMA, ed, mk_alias,
+        )
+        assert not r2.get("ok"), r2
+        assert "aposta aberta" in r2.get("error", "").lower()
+
+    print("OK duplicata — matchKey bloqueia IDs diferentes na mesma partida")
+
+
 def main() -> int:
     print("=== Regra notstarted ===")
     test_evento_apostavel()
+    print("\n=== Duplicata matchKey ===")
+    test_duplicata_match_key()
     print("\n=== Escopo /hoje ===")
     test_eventos_apostaveis_escopo()
     print("\n=== Convex API ===")
