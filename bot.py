@@ -7479,6 +7479,8 @@ def _build_ajuda_embed() -> discord.Embed:
             "`!proximos 10 30 Flamengo` — Quantidade + horizonte em dias\n"
             "`!proximos brasil` — Seleção Brasileira\n"
             "`!proximos [N] [dias] [liga] [time]`\n"
+            "`/proximos liga` — Próximos jogos só da competição\n"
+            "`/proximos time` — Próximos jogos de um time\n"
             "`!partida [time]` `/partida` — Detalhes da partida mais recente\n"
             "`!historico [time]` `/historico` — Partidas encerradas (últimos 90 dias)"
         ),
@@ -8689,36 +8691,64 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
         await interaction.followup.send(f"Erro ao gerar imagem: {e}")
 
 
-@bot.tree.command(name="proximos", description="Próximos jogos de um time ou de uma liga")
+proximos_group = discord.app_commands.Group(
+    name="proximos",
+    description="Próximos jogos de um time ou de uma liga",
+)
+
+
+@proximos_group.command(name="liga", description="Próximos jogos de uma competição")
 @discord.app_commands.describe(
-    liga="Liga — lista só jogos dela (time opcional)",
-    time="Nome do time (opcional se informar liga)",
+    liga="Competição",
     quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
     dias="Horizonte em dias (padrão: 90, máx.: 365)",
 )
-@discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
-async def slash_proximos(
+@discord.app_commands.autocomplete(liga=_liga_autocomplete)
+async def slash_proximos_liga(
     interaction: discord.Interaction,
-    liga: str = "",
-    time: str | None = None,
+    liga: str,
     quantidade: int = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ):
-    liga_key = _resolve_liga_key(liga) if liga else None
-    nome_time = (time or "").strip()
-    if not nome_time and not liga_key:
-        await interaction.response.send_message(
-            "Informe a liga ou o time. Ex: `/proximos liga:brasileirao` ou `/proximos time:Flamengo`",
-            ephemeral=True,
-        )
+    liga_key = _resolve_liga_key(liga)
+    if not liga_key:
+        await interaction.response.send_message("❌ Liga inválida.", ephemeral=True)
         return
     await _responder_proximos_time(
-        nome_time,
+        "",
         interaction=interaction,
         limite=quantidade,
         dias=dias,
         liga_key=liga_key,
     )
+
+
+@proximos_group.command(name="time", description="Próximos jogos de um time")
+@discord.app_commands.describe(
+    time="Nome do time",
+    liga="Filtrar por competição (opcional)",
+    quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
+    dias="Horizonte em dias (padrão: 90, máx.: 365)",
+)
+@discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
+async def slash_proximos_time(
+    interaction: discord.Interaction,
+    time: str,
+    liga: str = "",
+    quantidade: int = PROXIMOS_PADRAO,
+    dias: int = PROXIMOS_DIAS_PADRAO,
+):
+    liga_key = _resolve_liga_key(liga) if liga else None
+    await _responder_proximos_time(
+        time.strip(),
+        interaction=interaction,
+        limite=quantidade,
+        dias=dias,
+        liga_key=liga_key,
+    )
+
+
+bot.tree.add_command(proximos_group)
 
 
 @bot.tree.command(name="partida", description="Detalhes da partida mais recente de um time")
