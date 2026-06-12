@@ -166,13 +166,18 @@ def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, int, str | Non
     """Ex.: `10 30 flamengo` → (10 jogos, 30 dias, None, 'flamengo');
     `10 brasileirao flamengo` → (10, 90, 'brasileirao', 'flamengo');
     `brasileirao` → (5, 90, 'brasileirao', '')."""
+    tokens: list[str] = []
+    if primeiro:
+        tokens.append(primeiro.strip())
+    if resto:
+        tokens.extend(resto.strip().split())
+    return _parse_proximos_tokens(tokens)
+
+
+def _parse_proximos_tokens(tokens: list[str]) -> tuple[int, int, str | None, str]:
     qtd   = PROXIMOS_PADRAO
     dias  = PROXIMOS_DIAS_PADRAO
-    parts: list[str] = []
-    if primeiro:
-        parts.append(primeiro.strip())
-    if resto:
-        parts.extend(resto.strip().split())
+    parts = list(tokens)
     if parts and parts[0].isdigit():
         qtd = _normalizar_limite_proximos(int(parts[0]))
         parts = parts[1:]
@@ -181,8 +186,13 @@ def _parse_proximos_args(primeiro: str, resto: str) -> tuple[int, int, str | Non
         parts = parts[1:]
     if not parts:
         return qtd, dias, None, ""
-    if parts[0].lower() in LIGAS:
-        return qtd, dias, parts[0].lower(), " ".join(parts[1:]).strip()
+
+    # Liga com nome composto: "copa do brasil", "premier league", etc.
+    for n in range(min(len(parts), 4), 0, -1):
+        liga_key = _resolve_liga_key(" ".join(parts[:n]))
+        if liga_key:
+            return qtd, dias, liga_key, " ".join(parts[n:]).strip()
+
     return qtd, dias, None, " ".join(parts).strip()
 
 
@@ -1506,6 +1516,39 @@ def buscar_tabela(slug: str) -> dict | None:
 def _strip_accents(s: str) -> str:
     import unicodedata
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+
+# Aliases normalizados (sem acento/espaço) → chave em LIGAS
+_LIGA_ALIASES: dict[str, str] = {
+    "premier": "premierleague",
+    "championsleague": "champions",
+    "lib": "libertadores",
+    "sula": "sulamericana",
+    "sudamericana": "sulamericana",
+    "worldcup": "copadomundo",
+    "copadomundofifa": "copadomundo",
+    "bundes": "bundesliga",
+}
+
+
+def _normalize_liga_token(text: str) -> str:
+    return _strip_accents(text.lower()).replace(" ", "").replace("-", "").replace("_", "")
+
+
+def _resolve_liga_key(text: str) -> str | None:
+    """Reconhece chave de liga com ou sem acento/espaços (ex.: brasileirão → brasileirao)."""
+    norm = _normalize_liga_token(text)
+    if not norm:
+        return None
+    if norm in LIGAS:
+        return norm
+    if norm in _LIGA_ALIASES:
+        return _LIGA_ALIASES[norm]
+    for k in LIGAS:
+        if _normalize_liga_token(k) == norm:
+            return k
+    return None
+
 
 def _normalizar_canal(nome: str) -> str:
     """Normaliza nomes de canais: remove acentos, ESPN2→ESPN 2, etc."""
@@ -6641,6 +6684,56 @@ class ProximosLigaView(discord.ui.View):
         )
 
 
+class ProximosMenuView(discord.ui.View):
+    """Menu !proximos — por liga (sem time) ou por time."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+        opts = [
+            discord.SelectOption(
+                label=f"{LIGAS_META.get(k, {}).get('emoji', '🏆')} {LIGAS_META.get(k, {}).get('nome', k.title())}"[:100],
+                value=k,
+            )
+            for k in LIGAS
+        ][:25]
+        sel = discord.ui.Select(
+            placeholder="🏆 Próximos jogos da liga (sem escolher time)...",
+            options=opts,
+            row=0,
+        )
+        sel.callback = self._on_liga
+        self.add_item(sel)
+
+    async def _on_liga(self, interaction: discord.Interaction):
+        liga_key = interaction.data["values"][0]
+        for item in self.children:
+            item.disabled = True
+        meta = LIGAS_META.get(liga_key, {"nome": liga_key.title(), "emoji": "🏆"})
+        await interaction.response.edit_message(
+            content=f"🔍 Buscando próximos jogos — **{meta['emoji']} {meta['nome']}**...",
+            view=self,
+        )
+        await _responder_proximos_time(
+            "",
+            interaction=interaction,
+            liga_key=liga_key,
+        )
+
+    @discord.ui.button(
+        label="👕 Por time", style=discord.ButtonStyle.secondary, row=1,
+    )
+    async def btn_por_time(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SeguirTimeSelectView(modo="proximos")
+        if not view.children:
+            await interaction.response.send_message(
+                "Lista de times indisponível.", ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Escolha o time:", view=view, ephemeral=True,
+        )
+
+
 class SeguirEscolhaTimeView(discord.ui.View):
     """Escolhe casa ou visitante para seguir (ephemeral)."""
 
@@ -6829,14 +6922,10 @@ class MenuPrincipalView(discord.ui.View):
         custom_id="futebola:menu:proximos",
     )
     async def btn_proximos(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = SeguirTimeSelectView(modo="proximos")
-        if not view.children:
-            await interaction.response.send_message(
-                "Lista de times indisponível.", ephemeral=True,
-            )
-            return
         await interaction.response.send_message(
-            "Escolha o time:", view=view, ephemeral=True,
+            "🔜 **Próximos jogos** — escolha a liga ou busque por time:",
+            view=ProximosMenuView(),
+            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -7278,8 +7367,9 @@ def _view_proximos(jogos: list) -> "SeguirView | None":
 
 
 @bot.command(name="proximos")
-async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
-    if not primeiro:
+async def cmd_proximos(ctx, *, texto: str = ""):
+    texto = (texto or "").strip()
+    if not texto:
         ligas_disp = ", ".join(f"`{k}`" for k in LIGAS)
         await ctx.send(
             f"Uso: `!proximos [N] [dias] [liga] [time]`\n"
@@ -7291,7 +7381,7 @@ async def cmd_proximos(ctx, primeiro: str = "", *, resto: str = ""):
         )
         return
 
-    limite, dias, liga_key, nome_time = _parse_proximos_args(primeiro, resto)
+    limite, dias, liga_key, nome_time = _parse_proximos_tokens(texto.split())
 
     if not nome_time and not liga_key:
         await ctx.send(
@@ -8601,28 +8691,29 @@ async def slash_chaveamento(interaction: discord.Interaction, liga: str = "champ
 
 @bot.tree.command(name="proximos", description="Próximos jogos de um time ou de uma liga")
 @discord.app_commands.describe(
+    liga="Liga — lista só jogos dela (time opcional)",
     time="Nome do time (opcional se informar liga)",
-    liga="Liga — filtra por competição ou lista só jogos dela",
     quantidade="Quantos jogos listar (padrão: 5, máx.: 25)",
     dias="Horizonte em dias (padrão: 90, máx.: 365)",
 )
 @discord.app_commands.autocomplete(liga=_liga_autocomplete, time=_time_autocomplete)
 async def slash_proximos(
     interaction: discord.Interaction,
-    time: str = "",
     liga: str = "",
+    time: str | None = None,
     quantidade: int = PROXIMOS_PADRAO,
     dias: int = PROXIMOS_DIAS_PADRAO,
 ):
-    liga_key = liga.lower() if liga.lower() in LIGAS else None
-    if not (time or "").strip() and not liga_key:
+    liga_key = _resolve_liga_key(liga) if liga else None
+    nome_time = (time or "").strip()
+    if not nome_time and not liga_key:
         await interaction.response.send_message(
-            "Informe o time ou a liga. Ex: `/proximos time:Flamengo` ou `/proximos liga:brasileirao`",
+            "Informe a liga ou o time. Ex: `/proximos liga:brasileirao` ou `/proximos time:Flamengo`",
             ephemeral=True,
         )
         return
     await _responder_proximos_time(
-        time.strip(),
+        nome_time,
         interaction=interaction,
         limite=quantidade,
         dias=dias,
