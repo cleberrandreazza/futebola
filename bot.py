@@ -136,7 +136,7 @@ LIGAS = {
 # Ligas exibidas no !hoje e no resumo diário automático
 LIGAS_RESUMO = ["copadomundo", "amistosos", "brasileirao", "champions", "libertadores", "premierleague", "sulamericana"]
 
-# Mesmo escopo de ligas para /apostar (somente jogos de hoje, iguais ao /hoje)
+# Mesmo escopo de ligas para /apostar (hoje + amanhã, mesmas ligas do /hoje)
 LIGAS_APOSTAS = list(LIGAS_RESUMO)
 
 PROXIMOS_PADRAO = 5
@@ -862,17 +862,22 @@ def _bzzoiro_ev_to_fixture(ev: dict, logo_map: dict) -> dict:
     }
 
 
-def buscar_jogos_copa_hoje() -> list:
-    """Fixtures de hoje na Copa do Brasil 2026 via Bzzoiro."""
-    hoje = datetime.now(tz=BRT).date()
+def buscar_jogos_copa_dia(dia: date | None = None) -> list:
+    """Fixtures de um dia na Copa do Brasil via Bzzoiro."""
+    dia = dia or datetime.now(tz=BRT).date()
     data = _bzzoiro_get("events/", {
         "league_id": _BZ_COPA_LEAGUE, "season_id": _BZ_COPA_SEASON,
-        "date_from": str(hoje), "date_to": str(hoje), "limit": 50,
+        "date_from": str(dia), "date_to": str(dia), "limit": 50,
     })
     if not data:
         return []
     logo_map = _buscar_logos_brasileiros()
     return [_bzzoiro_ev_to_fixture(ev, logo_map) for ev in data.get("results", [])]
+
+
+def buscar_jogos_copa_hoje() -> list:
+    """Fixtures de hoje na Copa do Brasil 2026 via Bzzoiro."""
+    return buscar_jogos_copa_dia(datetime.now(tz=BRT).date())
 
 
 # ----- Notificações ao vivo do !seguir (via Bzzoiro) -----
@@ -4886,21 +4891,23 @@ def _jogo_hoje_para_apostavel(
 
 
 def _bz_eventos_apostaveis() -> list[dict]:
-    """Partidas apostáveis hoje — mesmas ligas e jogos NS do /hoje (sem extras do Bzzoiro)."""
+    """Partidas apostáveis hoje e amanhã — mesmas ligas do /hoje, status notstarted."""
     hoje = datetime.now(tz=BRT).date()
+    amanha = hoje + timedelta(days=1)
     por_id: dict[str, dict] = {}
     por_match: set[str] = set()
 
-    for chave in LIGAS_APOSTAS:
-        for jogo in _buscar_jogos_liga_hoje(chave):
-            ev = _jogo_hoje_para_apostavel(jogo, chave, dia=hoje)
-            if not ev:
-                continue
-            mk = _aposta_match_key_from_ev(ev)
-            if mk in por_match:
-                continue
-            por_match.add(mk)
-            por_id[str(ev["id"])] = ev
+    for dia in (hoje, amanha):
+        for chave in LIGAS_APOSTAS:
+            for jogo in _buscar_jogos_liga_dia(chave, dia):
+                ev = _jogo_hoje_para_apostavel(jogo, chave, dia=dia)
+                if not ev:
+                    continue
+                mk = _aposta_match_key_from_ev(ev)
+                if mk in por_match:
+                    continue
+                por_match.add(mk)
+                por_id[str(ev["id"])] = ev
 
     out = list(por_id.values())
     out.sort(key=lambda e: e.get("event_date", ""))
@@ -5316,18 +5323,23 @@ async def atualizar_players():
             print(f"[Player] Erro ao atualizar guild {guild_id}: {e}")
 
 
-def _buscar_jogos_liga_hoje(chave: str) -> list[dict]:
-    """Jogos de hoje para uma liga — mesma fonte usada pelo /hoje."""
+def _buscar_jogos_liga_dia(chave: str, dia: date) -> list[dict]:
+    """Jogos de uma liga em uma data (BRT)."""
     try:
         if chave in LIGAS_COPA:
-            return buscar_jogos_copa_hoje()
+            return buscar_jogos_copa_dia(dia)
         slug = LIGAS.get(chave)
         if not slug:
             return []
-        return buscar_jogos_do_dia(slug)
+        return buscar_jogos_do_dia(slug, dia.strftime("%Y%m%d"))
     except Exception as e:
-        print(f"[JogosHoje] {chave}: {e}")
+        print(f"[JogosDia] {chave} {dia}: {e}")
         return []
+
+
+def _buscar_jogos_liga_hoje(chave: str) -> list[dict]:
+    """Jogos de hoje para uma liga — mesma fonte usada pelo /hoje."""
+    return _buscar_jogos_liga_dia(chave, datetime.now(tz=BRT).date())
 
 
 async def _buscar_jogos_resumo_paralelo(chaves: list[str] | None = None) -> dict:
@@ -7601,7 +7613,7 @@ def _build_ajuda_embed() -> discord.Embed:
         name="🎰  Apostas fictícias (cargo Boleiros / Admin)",
         value=(
             "`/saldo` — Seu saldo e estatísticas\n"
-            "`/apostar` — Apostar nos jogos de **hoje** que ainda não iniciaram (mesmas ligas do `/hoje`)\n"
+            "`/apostar` — Apostar em jogos de **hoje e amanhã** que ainda não iniciaram\n"
             "`/minhas-apostas` — Apostas abertas e recentes\n"
             "`/rank-apostas` — Ranking por vitórias, saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
@@ -8164,6 +8176,8 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
     opts: list[discord.SelectOption] = []
     seen: set[str] = set()
     _emoji = {9: "🇧🇷", 35: "🏆", 32: "🌎", 33: "🌎"}
+    hoje = datetime.now(tz=BRT).date()
+    amanha = hoje + timedelta(days=1)
     for ev in events:
         eid = ev.get("id")
         if eid is None or str(eid) in seen:
@@ -8175,10 +8189,15 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
         status = ev.get("status", "notstarted")
         try:
             dt  = datetime.fromisoformat(ev.get("event_date","").replace("Z","+00:00")).astimezone(BRT)
-            tme = dt.strftime("%H:%M")
+            if dt.date() == hoje:
+                hora_txt = dt.strftime("%H:%M")
+            elif dt.date() == amanha:
+                hora_txt = f"Amanhã {dt.strftime('%H:%M')}"
+            else:
+                hora_txt = dt.strftime("%d/%m %H:%M")
         except Exception:
-            tme = ""
-        label = f"{emoji} {home} × {away}"[:95] + (f" · {tme}" if tme and tme != "00:00" else "")
+            hora_txt = ""
+        label = f"{emoji} {home} × {away}"[:95] + (f" · {hora_txt}" if hora_txt else "")
         if status not in ("notstarted", "finished"):
             desc = "🔴 Ao Vivo"
         elif status == "finished":
@@ -8902,7 +8921,7 @@ async def slash_apostar(interaction: discord.Interaction):
         return
     await interaction.followup.send(
         f"🎰 **Apostar** — odd **{APOSTA_ODD:.1f}x** · mín. **{APOSTA_MINIMA}** créditos\n"
-        "Somente jogos de **hoje** que ainda **não iniciaram**.\n"
+        "Jogos de **hoje e amanhã** que ainda **não iniciaram**.\n"
         "Escolha a partida:",
         view=view,
     )
