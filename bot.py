@@ -4569,7 +4569,7 @@ def _apostas_settle(aposta_id: str, resultado: str) -> bool:
 
 
 def _ranking_sort_key(row: dict, criterio: str) -> tuple:
-    """Chave de ordenação: vitorias (W↓, L↑, saldo↓), saldo ou lucro."""
+    """Vitórias: W↓, L↑; desempate oculto por saldo (não exibir no embed)."""
     if criterio == "lucro":
         return (-row.get("totalGanho", 0),)
     if criterio == "saldo":
@@ -4578,7 +4578,21 @@ def _ranking_sort_key(row: dict, criterio: str) -> tuple:
         -int(row.get("apostasGanhas", 0)),
         int(row.get("apostasPerdidas", 0)),
         -int(row.get("saldo", 0)),
+        row.get("userId", ""),
     )
+
+
+def _ranking_linha(row: dict, criterio: str) -> str:
+    """Texto público de cada posição — vitórias não revela o desempate por saldo."""
+    nome = row.get("displayName", "?")[:24]
+    if criterio == "saldo":
+        return f"{nome} — **{_fmt_creditos_aposta(row.get('saldo', 0))}** créditos"
+    if criterio == "lucro":
+        lucro = int(row.get("totalGanho", 0))
+        sinal = "+" if lucro > 0 else ""
+        return f"{nome} — **{sinal}{_fmt_creditos_aposta(lucro)}** créditos"
+    wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
+    return f"{nome} — **{wl}**"
 
 
 def _apostas_ranking(criterio: str = "vitorias", limit: int = 15) -> list[dict]:
@@ -5039,9 +5053,7 @@ def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None
         if viewer_id and row["userId"] == viewer_id:
             pos_viewer = pos
         m = medalhas[i] if i < 3 else f"**{pos}.**"
-        nome = row.get("displayName", "?")[:24]
-        wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
-        linhas.append(f"{m} {nome} — **{wl}**")
+        linhas.append(f"{m} {_ranking_linha(row, criterio)}")
 
     embed.description = "\n".join(linhas)
     if pos_viewer:

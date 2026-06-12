@@ -406,7 +406,11 @@ export const getRanking = query({
       if (a.apostasPerdidas !== b.apostasPerdidas) {
         return a.apostasPerdidas - b.apostasPerdidas;
       }
-      return b.saldo - a.saldo;
+      // Desempate oculto: saldo (não exibir no ranking de vitórias)
+      if (b.saldo !== a.saldo) {
+        return b.saldo - a.saldo;
+      }
+      return a.userId.localeCompare(b.userId);
     });
     return docs.slice(0, lim).map((d) => ({
       userId: d.userId,

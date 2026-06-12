@@ -310,7 +310,15 @@ def test_ranking_sort_vitorias() -> None:
     ]
     rows2.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
     assert [r["displayName"] for r in rows2] == ["aleque", "달", "erick", "zk"]
-    print("OK ranking — vitórias, menos derrotas, saldo em empate W-L")
+
+    rows3 = [
+        {"userId": "a", "displayName": "X", "saldo": 500, "apostasGanhas": 0, "apostasPerdidas": 0},
+        {"userId": "b", "displayName": "Y", "saldo": 900, "apostasGanhas": 0, "apostasPerdidas": 0},
+    ]
+    rows3.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
+    assert [r["displayName"] for r in rows3] == ["Y", "X"]
+    assert "créditos" not in bot._ranking_linha(rows3[0], "vitorias").lower()
+    print("OK ranking — vitórias, menos derrotas, desempate oculto por saldo")
 
 
 def test_espn_liquidacao_summary() -> None:
