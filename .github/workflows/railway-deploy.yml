@@ -19,11 +19,17 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "RAILWAY_TOKEN não configurado — pulando deploy via Actions."
-            echo "Configure o secret em GitHub → Settings → Secrets → Actions"
-            exit 0
+            echo "::error::RAILWAY_TOKEN não configurado — deploy ignorado."
+            echo "Configure em GitHub → Settings → Secrets → Actions"
+            echo "Ou conecte o repo no painel Railway (Source → GitHub) para auto-deploy."
+            echo "Redeploy manual: docs/DEPLOY_RAILWAY.md"
+            exit 1
           fi
-          railway redeploy --yes --service "${{ secrets.RAILWAY_SERVICE_ID }}"
+          if [ -z "${{ secrets.RAILWAY_SERVICE_ID }}" ]; then
+            echo "::error::RAILWAY_SERVICE_ID não configurado."
+            exit 1
+          fi
+          railway up --detach --service "${{ secrets.RAILWAY_SERVICE_ID }}"
 
       - name: Deploy Convex functions
         env:
