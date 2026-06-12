@@ -4326,6 +4326,15 @@ def _fmt_creditos_aposta(n: int | float) -> str:
     return f"{int(n):,}".replace(",", ".")
 
 
+def _label_modal_aposta(saldo: int) -> str:
+    saldo_txt = _fmt_creditos_aposta(saldo)
+    label = f"Créditos · saldo {saldo_txt} (mín. {APOSTA_MINIMA})"
+    if len(label) <= 45:
+        return label
+    curto = f"Saldo {saldo_txt} · mín. {APOSTA_MINIMA}"
+    return curto if len(curto) <= 45 else curto[:45]
+
+
 def _status_aposta_label(st: str) -> str:
     return {
         "aberta": "Aguardando jogo",
@@ -8271,15 +8280,16 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
 
 
 class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
-    def __init__(self, ev: dict, palpite: str, uid: int, display_name: str):
+    def __init__(self, ev: dict, palpite: str, uid: int, display_name: str, saldo: int):
         super().__init__()
         self.ev = ev
         self.palpite = palpite
         self.uid = uid
         self.display_name = display_name
+        saldo_txt = _fmt_creditos_aposta(saldo)
         self.valor_input = discord.ui.TextInput(
-            label=f"Créditos (mín. {APOSTA_MINIMA})",
-            placeholder=str(APOSTA_MINIMA),
+            label=_label_modal_aposta(saldo),
+            placeholder=f"Até {saldo_txt} créditos",
             min_length=1,
             max_length=8,
         )
@@ -8365,8 +8375,12 @@ class ApostaPalpiteView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        ap = await loop.run_in_executor(
+            None, _apostas_ensure, str(self.uid), self.display_name
+        )
+        saldo = int(ap.get("saldo", 0))
         await interaction.response.send_modal(
-            ApostaValorModal(self.ev, palpite, self.uid, self.display_name)
+            ApostaValorModal(self.ev, palpite, self.uid, self.display_name, saldo)
         )
 
 
