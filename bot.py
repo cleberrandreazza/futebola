@@ -84,6 +84,8 @@ CREDITO_SEMANAL   = int(os.getenv("CREDITO_SEMANAL", "1000"))
 CREDITO_INICIAL   = int(os.getenv("CREDITO_INICIAL", "1000"))
 APOSTA_MINIMA     = int(os.getenv("APOSTA_MINIMA", "10"))
 APOSTA_ODD        = float(os.getenv("APOSTA_ODD", "2.0"))
+MINHAS_APOSTAS_LIMIT = 10
+RANKING_POS_JOGO_COOLDOWN_S = 900  # evita post duplicado (mesma partida / réplicas)
 _BZ_COPA_LEAGUE          = 35
 _BZ_COPA_SEASON          = 78
 _BZ_BRASILEIRAO_LEAGUE   = 9
@@ -4599,7 +4601,8 @@ def _apostas_ranking(criterio: str = "vitorias", limit: int = 15) -> list[dict]:
     if _convex_client:
         rows = _convex_query("apostas:getRanking", {"criterio": criterio, "limit": limit})
         if rows is not None:
-            return rows or []
+            rows = sorted(rows, key=lambda r: _ranking_sort_key(r, criterio))
+            return rows[:limit]
     data = _carregar_apostas_local()
     rows = [
         {"userId": uid, **row}
@@ -4685,6 +4688,18 @@ def _aposta_match_key_from_ev(ev: dict) -> str:
     away = ev.get("away_team") or ev.get("away") or "?"
     ed = ev.get("event_date") or ""
     return _aposta_match_key(home, away, ed or None)
+
+
+def _partida_liquidacao_key(bet: dict) -> str:
+    """Chave canônica da partida — evita ranking duplicado por eventId/matchKey distintos."""
+    home = bet.get("home", "?")
+    away = bet.get("away", "?")
+    mk = bet.get("matchKey")
+    dia: str | None = None
+    if mk and "|" in str(mk):
+        dia = str(mk).split("|", 1)[0]
+    ed = f"{dia}T12:00:00" if dia else None
+    return _aposta_match_key(home, away, ed)
 
 
 def _bet_conflicts_open(bet: dict, match_key: str, event_id: str) -> bool:
@@ -5068,8 +5083,18 @@ def _canal_apostas_publico() -> int:
     return CANAL_COMANDOS_ID or CANAL_RESUMO_ID
 
 
+_ranking_pos_jogo_ts: dict[str, float] = {}
+
+
 async def _publicar_ranking_pos_partida(home: str, away: str, resultado: str) -> None:
     """Publica o mesmo embed de /rank-apostas após liquidar apostas de uma partida."""
+    chave = _aposta_match_key(home, away)
+    agora = time.time()
+    ultimo = _ranking_pos_jogo_ts.get(chave, 0)
+    if agora - ultimo < RANKING_POS_JOGO_COOLDOWN_S:
+        print(f"[Apostas] Ranking pós-jogo ignorado (cooldown): {home}×{away}", flush=True)
+        return
+    _ranking_pos_jogo_ts[chave] = agora
     canal_id = _canal_apostas_publico()
     if not canal_id:
         print(
@@ -5517,7 +5542,7 @@ async def liquidar_apostas():
             home = bet.get("home", "?")
             away = bet.get("away", "?")
             print(f"[Apostas] Liquidada {aposta_id}: {home}×{away} → {res}", flush=True)
-            chave = str(bet.get("matchKey") or eid)
+            chave = _partida_liquidacao_key(bet)
             if chave not in partidas_liquidadas:
                 partidas_liquidadas[chave] = {"home": home, "away": away, "res": res}
         else:
@@ -7696,7 +7721,7 @@ def _build_ajuda_embed() -> discord.Embed:
         value=(
             "`/saldo` — Seu saldo e estatísticas\n"
             "`/apostar` — Apostar em jogos de **hoje e amanhã** que ainda não iniciaram\n"
-            "`/minhas-apostas` — Apostas abertas e recentes\n"
+            "`/minhas-apostas` — Suas últimas apostas (até 10)\n"
             "`/rank-apostas` — Ranking por vitórias, saldo ou lucro\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
         ),
@@ -9025,13 +9050,13 @@ async def slash_minhas_apostas(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
     loop = asyncio.get_event_loop()
-    bets = await loop.run_in_executor(None, _apostas_list_user, uid, 12)
+    bets = await loop.run_in_executor(None, _apostas_list_user, uid, MINHAS_APOSTAS_LIMIT)
     if not bets:
         await interaction.followup.send("📭 Você ainda não fez nenhuma aposta.")
         return
 
     abertas = sum(1 for b in bets if b.get("status") == "aberta")
-    blocos = [_linha_minhas_apostas(b) for b in bets[:12]]
+    blocos = [_linha_minhas_apostas(b) for b in bets[:MINHAS_APOSTAS_LIMIT]]
     embed = discord.Embed(
         title="🎰 Suas apostas",
         description="\n\n".join(blocos),

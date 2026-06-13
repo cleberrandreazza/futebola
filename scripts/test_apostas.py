@@ -311,6 +311,13 @@ def test_ranking_sort_vitorias() -> None:
     rows2.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
     assert [r["displayName"] for r in rows2] == ["aleque", "달", "erick", "zk"]
 
+    rows_wl = [
+        {"userId": "1", "displayName": "Ana", "saldo": 200, "apostasGanhas": 1, "apostasPerdidas": 0},
+        {"userId": "2", "displayName": "Bob", "saldo": 900, "apostasGanhas": 1, "apostasPerdidas": 1},
+    ]
+    rows_wl.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
+    assert [r["displayName"] for r in rows_wl] == ["Ana", "Bob"]
+
     rows3 = [
         {"userId": "a", "displayName": "X", "saldo": 500, "apostasGanhas": 0, "apostasPerdidas": 0},
         {"userId": "b", "displayName": "Y", "saldo": 900, "apostasGanhas": 0, "apostasPerdidas": 0},
