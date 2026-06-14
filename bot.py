@@ -1733,6 +1733,77 @@ _SELECOES_ALIASES: dict[str, str] = {
     "republica tcheca": "Czechia", "república tcheca": "Czechia",
     "czech republic": "Czechia", "czechia": "Czechia",
 }
+
+# Nome ESPN/canônico → exibição pt-BR (apostas, menus)
+_SELECOES_PTBR: dict[str, str] = {
+    "Australia": "Austrália",
+    "Argentina": "Argentina",
+    "Belgium": "Bélgica",
+    "Bolivia": "Bolívia",
+    "Bosnia and Herzegovina": "Bósnia-Herzegovina",
+    "Bosnia-Herzegovina": "Bósnia-Herzegovina",
+    "Brazil": "Brasil",
+    "Canada": "Canadá",
+    "Chile": "Chile",
+    "China": "China",
+    "Colombia": "Colômbia",
+    "Costa Rica": "Costa Rica",
+    "Croatia": "Croácia",
+    "Curaçao": "Curaçao",
+    "Curacao": "Curaçao",
+    "Czechia": "Tchéquia",
+    "Czech Republic": "Tchéquia",
+    "Denmark": "Dinamarca",
+    "Ecuador": "Equador",
+    "Egypt": "Egito",
+    "England": "Inglaterra",
+    "France": "França",
+    "Germany": "Alemanha",
+    "Ghana": "Gana",
+    "Greece": "Grécia",
+    "Haiti": "Haiti",
+    "Iran": "Irã",
+    "Ireland": "Irlanda",
+    "Republic of Ireland": "Irlanda",
+    "Ivory Coast": "Costa do Marfim",
+    "Côte d'Ivoire": "Costa do Marfim",
+    "Japan": "Japão",
+    "Jordan": "Jordânia",
+    "Mexico": "México",
+    "Morocco": "Marrocos",
+    "Netherlands": "Holanda",
+    "New Zealand": "Nova Zelândia",
+    "Nigeria": "Nigéria",
+    "Norway": "Noruega",
+    "Panama": "Panamá",
+    "Paraguay": "Paraguai",
+    "Peru": "Peru",
+    "Poland": "Polônia",
+    "Portugal": "Portugal",
+    "Qatar": "Catar",
+    "Romania": "Romênia",
+    "Saudi Arabia": "Arábia Saudita",
+    "Scotland": "Escócia",
+    "Senegal": "Senegal",
+    "Serbia": "Sérvia",
+    "Slovakia": "Eslováquia",
+    "Slovenia": "Eslovênia",
+    "South Africa": "África do Sul",
+    "South Korea": "Coreia do Sul",
+    "Korea Republic": "Coreia do Sul",
+    "Spain": "Espanha",
+    "Sweden": "Suécia",
+    "Switzerland": "Suíça",
+    "Tunisia": "Tunísia",
+    "Turkey": "Turquia",
+    "Türkiye": "Turquia",
+    "Ukraine": "Ucrânia",
+    "United States": "Estados Unidos",
+    "USA": "Estados Unidos",
+    "Uruguay": "Uruguai",
+    "Venezuela": "Venezuela",
+    "Wales": "País de Gales",
+}
 _LIGAS_SELECAO = frozenset({"amistosos", "copadomundo"})
 
 
@@ -1747,6 +1818,21 @@ def _canonical_selecao(nome: str) -> str | None:
     """Nome canônico ESPN se for busca por seleção; aceita com ou sem acento. Senão None."""
     n = _strip_accents((nome or "").lower().strip())
     return _SELECOES_NORM.get(n)
+
+
+def _nome_selecao_ptbr(nome: str) -> str:
+    """Exibe seleção em pt-BR; mantém nome original se não for seleção conhecida."""
+    raw = (nome or "").strip()
+    if not raw:
+        return "?"
+    canon = _canonical_selecao(raw) or raw
+    if canon in _SELECOES_PTBR:
+        return _SELECOES_PTBR[canon]
+    low = _strip_accents(canon.lower())
+    for en, pt in _SELECOES_PTBR.items():
+        if _strip_accents(en.lower()) == low:
+            return pt
+    return raw
 
 
 def buscar_time_id(slug: str, nome_time: str) -> tuple | None:
@@ -8278,20 +8364,38 @@ def _buscar_event_id_por_time(nome_time: str) -> int | None:
     return None
 
 
-def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
-    """Constrói opções do Select Menu a partir de eventos Bzzoiro."""
+def _apostas_open_match_keys(user_id: str) -> set[str]:
+    """Chaves de partidas com aposta aberta do usuário."""
+    keys: set[str] = set()
+    bets = _apostas_list_user(user_id, 50)
+    for b in bets:
+        if b.get("status") != "aberta":
+            continue
+        mk = b.get("matchKey")
+        if mk:
+            keys.add(str(mk))
+        keys.add(_aposta_match_key(b.get("home", ""), b.get("away", "")))
+    return keys
+
+
+def _build_partida_options(
+    events: list[dict],
+    open_match_keys: set[str] | None = None,
+) -> list[discord.SelectOption]:
+    """Constrói opções do Select Menu a partir de eventos Bzzoiro/ESPN."""
     opts: list[discord.SelectOption] = []
     seen: set[str] = set()
     _emoji = {9: "🇧🇷", 35: "🏆", 32: "🌎", 33: "🌎"}
     hoje = datetime.now(tz=BRT).date()
     amanha = hoje + timedelta(days=1)
+    open_match_keys = open_match_keys or set()
     for ev in events:
         eid = ev.get("id")
         if eid is None or str(eid) in seen:
             continue
         seen.add(str(eid))
-        home   = ev.get("home_team", "?")
-        away   = ev.get("away_team", "?")
+        home   = _nome_selecao_ptbr(ev.get("home_team", "?"))
+        away   = _nome_selecao_ptbr(ev.get("away_team", "?"))
         emoji  = _emoji.get(ev.get("league_id", 0), "⚽")
         status = ev.get("status", "notstarted")
         try:
@@ -8305,13 +8409,16 @@ def _build_partida_options(events: list[dict]) -> list[discord.SelectOption]:
         except Exception:
             hora_txt = ""
         label = f"{emoji} {home} × {away}"[:95] + (f" · {hora_txt}" if hora_txt else "")
+        mk = _aposta_match_key_from_ev(ev)
         if status not in ("notstarted", "finished"):
             desc = "🔴 Ao Vivo"
         elif status == "finished":
             desc = "✅ Encerrado"
+        elif mk in open_match_keys:
+            desc = "✅ Aposta realizada"
         else:
             liga = _BZ_LEAGUE_NAMES.get(ev.get("league_id") or 0, "")
-            desc = liga[:100] if liga else "A iniciar"
+            desc = liga[:100] if liga else "Disponível"
         opts.append(discord.SelectOption(label=label[:100], value=str(eid), description=desc[:100]))
     return opts[:25]
 
@@ -8341,6 +8448,8 @@ class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
 
         home = self.ev.get("home_team", "?")
         away = self.ev.get("away_team", "?")
+        home_pt = _nome_selecao_ptbr(home)
+        away_pt = _nome_selecao_ptbr(away)
         mk = _aposta_match_key_from_ev(self.ev)
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -8363,8 +8472,8 @@ class ApostaValorModal(discord.ui.Modal, title="Valor da aposta"):
         retorno = int(valor * APOSTA_ODD)
         await interaction.response.send_message(
             f"✅ Aposta registrada!\n"
-            f"**{home} × {away}**\n"
-            f"Palpite: **{_palpite_label(self.palpite, home, away)}** · odd **{APOSTA_ODD:.1f}x**\n"
+            f"**{home_pt} × {away_pt}**\n"
+            f"Palpite: **{_palpite_label(self.palpite, home_pt, away_pt)}** · odd **{APOSTA_ODD:.1f}x**\n"
             f"Valor: **{valor:,}** → retorno **{retorno:,}** créditos\n"
             f"Saldo restante: **{result.get('novoSaldo', 0):,}**".replace(",", "."),
             ephemeral=True,
@@ -8377,8 +8486,8 @@ class ApostaPalpiteView(discord.ui.View):
         self.ev = ev
         self.uid = uid
         self.display_name = display_name
-        home = ev.get("home_team", "Casa")
-        away = ev.get("away_team", "Fora")
+        home = _nome_selecao_ptbr(ev.get("home_team", "Casa"))
+        away = _nome_selecao_ptbr(ev.get("away_team", "Fora"))
 
         b1 = discord.ui.Button(label=f"1 · {home[:20]}", style=discord.ButtonStyle.primary, row=0)
         bx = discord.ui.Button(label="X · Empate", style=discord.ButtonStyle.secondary, row=0)
@@ -8426,7 +8535,8 @@ class ApostaSelectView(discord.ui.View):
         super().__init__(timeout=180)
         self.uid = uid
         self.display_name = display_name
-        opcoes = _build_partida_options(eventos)
+        open_keys = _apostas_open_match_keys(str(uid))
+        opcoes = _build_partida_options(eventos, open_match_keys=open_keys)
         if not opcoes:
             return
         sel = discord.ui.Select(
@@ -8455,8 +8565,8 @@ class ApostaSelectView(discord.ui.View):
             return
         if chk.get("event"):
             ev = chk["event"]
-        home = ev.get("home_team", "?")
-        away = ev.get("away_team", "?")
+        home = _nome_selecao_ptbr(ev.get("home_team", "?"))
+        away = _nome_selecao_ptbr(ev.get("away_team", "?"))
         mk = _aposta_match_key_from_ev(ev)
         if _apostas_has_open_on_match(str(self.uid), mk, str(ev.get("id"))):
             await interaction.response.send_message(
