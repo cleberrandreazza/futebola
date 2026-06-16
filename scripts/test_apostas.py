@@ -324,7 +324,7 @@ def test_ranking_sort_vitorias() -> None:
     ]
     rows3.sort(key=lambda r: bot._ranking_sort_key(r, "vitorias"))
     assert [r["displayName"] for r in rows3] == ["Y", "X"]
-    assert "créditos" not in bot._ranking_linha(rows3[0], "vitorias").lower()
+    assert "créditos" not in bot._ranking_linha(rows3[0]).lower()
     print("OK ranking — vitórias, menos derrotas, desempate oculto por saldo")
 
 

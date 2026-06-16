@@ -4670,15 +4670,9 @@ def _ranking_sort_key(row: dict, criterio: str) -> tuple:
     )
 
 
-def _ranking_linha(row: dict, criterio: str) -> str:
-    """Texto público de cada posição — vitórias não revela o desempate por saldo."""
+def _ranking_linha(row: dict) -> str:
+    """Texto público — só W-L; saldo é desempate oculto (não exibir)."""
     nome = row.get("displayName", "?")[:24]
-    if criterio == "saldo":
-        return f"{nome} — **{_fmt_creditos_aposta(row.get('saldo', 0))}** créditos"
-    if criterio == "lucro":
-        lucro = int(row.get("totalGanho", 0))
-        sinal = "+" if lucro > 0 else ""
-        return f"{nome} — **{sinal}{_fmt_creditos_aposta(lucro)}** créditos"
     wl = f"{int(row.get('apostasGanhas', 0))}W-{int(row.get('apostasPerdidas', 0))}L"
     return f"{nome} — **{wl}**"
 
@@ -5135,13 +5129,8 @@ def _embed_saldo(ap: dict) -> discord.Embed:
     return embed
 
 
-def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None) -> discord.Embed:
-    titulos = {
-        "vitorias": "🏆 Ranking — Vitórias",
-        "saldo": "🏆 Ranking — Saldo",
-        "lucro": "🏆 Ranking — Lucro",
-    }
-    embed = discord.Embed(title=titulos.get(criterio, titulos["vitorias"]), color=0xEAB308)
+def _embed_ranking(rows: list[dict], viewer_id: str | None = None) -> discord.Embed:
+    embed = discord.Embed(title="🏆 Ranking — Vitórias", color=0xEAB308)
     if not rows:
         embed.description = "Ninguém apostou ainda."
         return embed
@@ -5154,7 +5143,7 @@ def _embed_ranking(rows: list[dict], criterio: str, viewer_id: str | None = None
         if viewer_id and row["userId"] == viewer_id:
             pos_viewer = pos
         m = medalhas[i] if i < 3 else f"**{pos}.**"
-        linhas.append(f"{m} {_ranking_linha(row, criterio)}")
+        linhas.append(f"{m} {_ranking_linha(row)}")
 
     embed.description = "\n".join(linhas)
     if pos_viewer:
@@ -5202,7 +5191,7 @@ async def _publicar_ranking_pos_partida(home: str, away: str, resultado: str) ->
 
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 15)
-    embed = _embed_ranking(rows, "vitorias")
+    embed = _embed_ranking(rows, None)
     if resultado == "cancel":
         intro = f"⚠️ **{home} × {away}** — partida cancelada · apostas estornadas"
     else:
@@ -7808,7 +7797,7 @@ def _build_ajuda_embed() -> discord.Embed:
             "`/saldo` — Seu saldo e estatísticas\n"
             "`/apostar` — Apostar em jogos de **hoje e amanhã** que ainda não iniciaram\n"
             "`/minhas-apostas` — Suas últimas apostas (até 10)\n"
-            "`/rank-apostas` — Ranking por vitórias, saldo ou lucro\n"
+            "`/rank-apostas` — Ranking por vitórias (W-L)\n"
             f"Crédito semanal: **+{CREDITO_SEMANAL:,}** (segunda) · odd **{APOSTA_ODD:.1f}x**".replace(",", ".")
         ),
         inline=False,
@@ -9179,19 +9168,13 @@ async def slash_minhas_apostas(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-@bot.tree.command(name="rank-apostas", description="Ranking dos apostadores fictícios")
-@discord.app_commands.describe(criterio="Ordenar por vitórias, saldo ou lucro")
-@discord.app_commands.choices(criterio=[
-    discord.app_commands.Choice(name="Vitórias", value="vitorias"),
-    discord.app_commands.Choice(name="Saldo", value="saldo"),
-    discord.app_commands.Choice(name="Lucro", value="lucro"),
-])
-async def slash_rank_apostas(interaction: discord.Interaction, criterio: str = "vitorias"):
+@bot.tree.command(name="rank-apostas", description="Ranking por vitórias (W-L)")
+async def slash_rank_apostas(interaction: discord.Interaction):
     await interaction.response.defer()
     loop = asyncio.get_event_loop()
-    rows = await loop.run_in_executor(None, _apostas_ranking, criterio, 15)
+    rows = await loop.run_in_executor(None, _apostas_ranking, "vitorias", 15)
     viewer = str(interaction.user.id) if interaction.user else None
-    embed = _embed_ranking(rows, criterio, viewer)
+    embed = _embed_ranking(rows, viewer)
     await interaction.followup.send(embed=embed)
 
 
